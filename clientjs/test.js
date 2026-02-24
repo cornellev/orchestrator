@@ -5,7 +5,7 @@ const { Client } = require("./Client");
     url: "ws://localhost:8080",
     onUpdate: (info) => {
       console.log("update", info);
-      c.stop();
+      //c.stop();
     },
     onNewTopic: (info) => console.log("new topic", info),
     onEcho: (topics) => console.log("echo", topics),

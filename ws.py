@@ -2,6 +2,7 @@ import asyncio
 from websockets.asyncio.server import serve
 from enum import Enum
 import serialization as s
+import names
 
 methods = {
     0x00: "echo",
@@ -25,6 +26,8 @@ class WebSocketServer:
         self.clients = {} # maps connected clients with last interaction time
         self.sim = ROSSim(self.broadcast)
 
+        self.nicknames = {} # maps client websockets to random nicknames for easier debugging
+
     async def broadcast(self, data: bytes, targets=None):
         # use a copy to avoid RuntimeError if clients disconnect during iteration
         if targets is None:
@@ -38,6 +41,9 @@ class WebSocketServer:
 
     async def handler(self, websocket):
         self.clients[websocket] = asyncio.get_event_loop().time() # store the time of connection
+        nickname = names.generate_name()
+        self.nicknames[websocket] = nickname
+        print(f"Client connected: {nickname} ({websocket.remote_address})")
         try:
             try:
                 async for message in websocket:
@@ -57,6 +63,9 @@ class WebSocketServer:
         finally:
             self.clients.pop(websocket, None)
             self.sim.unsubscribe(websocket)
+            print(f"Client disconnected: {nickname} ({websocket.remote_address})")
+            # remove nickname mapping
+            self.nicknames.pop(websocket, None)
 
 
     async def run(self) -> None:

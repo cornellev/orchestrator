@@ -210,6 +210,8 @@ class Client {
 		onNewTopic,
 		onUpdate,
 		onBigUpdate,
+		onOpen,
+		onClose,
 	} = {}) {
 		this.url = url;
 		this.reconnect = reconnect;
@@ -221,10 +223,14 @@ class Client {
 		this.onNewTopic = onNewTopic;
 		this.onUpdate = onUpdate;
 		this.onBigUpdate = onBigUpdate;
+		this.onOpen = onOpen;
+		this.onClose = onClose;
 
 		this.ws = null;
 		this.stopped = false;
 		this._connected = false;
+		this._ready = Promise.resolve();
+		this._readyResolve = () => {};
 	}
 
 	async start() {
@@ -274,12 +280,22 @@ class Client {
 			const ws = new WebSocketImpl(this.url);
 			this.ws = ws;
 			ws.binaryType = "arraybuffer";
+			this._ready = new Promise((r) => (this._readyResolve = r));
 			ws.onopen = () => {
 				this._connected = true;
+				this._readyResolve();
 				if (this.autoSubscribe) this.subscribe();
+				if (this.onOpen) {
+					try {
+						this.onOpen();
+					} catch (e) {
+						console.error("onOpen handler failed", e);
+					}
+				}
 				resolve();
 			};
 			ws.onerror = (err) => {
+				this._connected = false;
 				reject(err);
 			};
 			ws.onclose = () => {
@@ -299,6 +315,7 @@ class Client {
 				const code = buf[0];
 				const view = buf.subarray(1);
 				const kind = RESP_CODES[code];
+				console.log("Received message of kind", kind);
 				try {
 					if (kind === "echo") {
 						const topics = this._handleEcho(view);
@@ -317,8 +334,28 @@ class Client {
 					console.error("Failed to handle message", err);
 				}
 			};
-			ws.onclose = () => resolve();
-			ws.onerror = (err) => reject(err);
+			ws.onclose = () => {
+				this._connected = false;
+				if (this.onClose) {
+					try {
+						this.onClose();
+					} catch (e) {
+						console.error("onClose handler failed", e);
+					}
+				}
+				resolve();
+			};
+			ws.onerror = (err) => {
+				this._connected = false;
+				if (this.onClose) {
+					try {
+						this.onClose();
+					} catch (e) {
+						console.error("onClose handler failed", e);
+					}
+				}
+				reject(err);
+			};
 		});
 	}
 
@@ -335,6 +372,9 @@ class Client {
 	}
 
 	async _send(data) {
+		if (data === undefined) return; // ignore empty sends
+
+		await this._ready;
 		if (!this.ws || this.ws.readyState !== WebSocketImpl.OPEN) throw new Error("WebSocket not open");
 		this.ws.send(data);
 	}
@@ -344,4 +384,16 @@ function wait(ms) {
 	return new Promise((r) => setTimeout(r, ms));
 }
 
-module.exports = { Client, buildTopicData, encodeValue, decodeValue };
+// Export for Node (CommonJS) and attach to window in browsers
+if (typeof module !== "undefined" && module.exports) {
+	module.exports = { Client, buildTopicData, encodeValue, decodeValue };
+}
+
+if (typeof window !== "undefined") {
+	window.ROSClient = {
+		Client,
+		buildTopicData,
+		encodeValue,
+		decodeValue,
+	};
+}
