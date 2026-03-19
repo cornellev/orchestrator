@@ -108,7 +108,7 @@ Example usage:
 ```python
 import asyncio
 
-from client.client import OrchestratorClient, TopicInfo
+from client.client import OrchestratorClient, TopicInfo, TopicUpdate
 
 
 async def main() -> None:
@@ -117,8 +117,8 @@ async def main() -> None:
 				for t in topics:
 						print(f"- {t.name} ({t.type_str}), count={t.count}")
 
-		async def on_update(info: TopicInfo) -> None:
-				print(f"Update on {info.name}: type={info.type_str}, count={info.count}")
+		async def on_update(info: TopicUpdate) -> None:
+				print(f"Update on {info.name}: type={info.type_str}, count={info.count}, value={info.value}")
 
 		client = OrchestratorClient(
 				uri="ws://localhost:8080",
@@ -152,6 +152,12 @@ Both the JavaScript `Client` and Python `OrchestratorClient` support the same hi
 - `subscribe` – subscribe to topic updates.
 - `request_all` – request a snapshot of all known topic values.
 - `publish` – publish a single message to a named topic with a specific type.
+
+Protocol notes (responses):
+
+- `echo` (`0x80`) and `echo_new` (`0x81`) send topic metadata only.
+- `update` (`0x82`) sends topic metadata plus the encoded topic value (`[type byte][count (4 LE)][value bytes]`) appended after the metadata block.
+- `big_update` (`0x83`) sends a full snapshot of all topics and encoded values.
 
 When you run `main.py` and then start either client, you should see:
 

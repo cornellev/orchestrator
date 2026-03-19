@@ -184,6 +184,19 @@ function parseTopicInfo(view, offset) {
 	return { topicId, typeStr, count, name, next: nameEnd };
 }
 
+function parseUpdate(view) {
+	const info = parseTopicInfo(view, 0);
+	let value;
+
+	if (view.length > info.next) {
+		const decoded = decodeValue(view, info.next);
+		value = decoded.value;
+		info.next = decoded.next;
+	}
+
+	return { ...info, value };
+}
+
 function parseBigUpdate(view) {
 	const total = new DataView(view.buffer, view.byteOffset).getUint32(0, true);
 	let offset = 4;
@@ -324,7 +337,7 @@ class Client {
 						const info = parseTopicInfo(view, 0);
 						if (this.onNewTopic) await this.onNewTopic(info);
 					} else if (kind === "update") {
-						const info = parseTopicInfo(view, 0);
+						const info = parseUpdate(view);
 						if (this.onUpdate) await this.onUpdate(info);
 					} else if (kind === "big_update") {
 						const updates = parseBigUpdate(view);

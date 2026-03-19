@@ -90,6 +90,11 @@ def decode_topicData(topic_data: bytes):
     type_str, data = s.decode(topic_data[1+topic_len:])
     return topic_name, type_str, data
 
+def encode_topic_value(type_str: str, data):
+    if data is None:
+        return bytes([s.type_encoder(type_str)]) + (0).to_bytes(4, byteorder='little')
+    return s.encode(type_str, data)
+
 class ROSSim:
     def __init__(self, broadcaster):
         self.broadcast = broadcaster
@@ -207,6 +212,7 @@ class ROSSim:
         payload = bytearray()
         payload.append(responses["update"])
         payload.extend(self.smallTopicInfoMsg(topic_name))
+        payload.extend(encode_topic_value(self.get_topic_type(topic_name), self.get_topic_data(topic_name)))
 
         await self.broadcast(bytes(payload), targets=self.subscribers)
 

@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from websockets.asyncio.client import connect
 
@@ -29,6 +29,15 @@ class TopicInfo:
 	type_str: str
 	count: int
 	name: str
+
+
+@dataclass
+class TopicUpdate:
+	topic_id: int
+	type_str: str
+	count: int
+	name: str
+	value: Any = None
 
 
 def _build_topic_data(topic: str, type_str: str, data) -> bytes:
@@ -66,6 +75,16 @@ def _parse_big_update(buf: memoryview) -> Dict[str, Tuple[str, object]]:
 	return results
 
 
+def _parse_update(buf: memoryview) -> TopicUpdate:
+	info, offset = _parse_topic_info(buf, 0)
+	value = None
+	if offset < len(buf):
+		type_str, value = s.decode(bytes(buf[offset:]))
+		if type_str != info.type_str:
+			raise ValueError(f"Mismatched update type for topic '{info.name}': {type_str} != {info.type_str}")
+	return TopicUpdate(topic_id=info.topic_id, type_str=info.type_str, count=info.count, name=info.name, value=value)
+
+
 class OrchestratorClient:
 	"""
 	Minimal reciprocal client that speaks the websocket protocol defined by the server
@@ -81,7 +100,7 @@ class OrchestratorClient:
 		backoff_max: float = 10.0,
 		on_echo: Optional[Callable[[Tuple[TopicInfo, ...]], Awaitable[None] | None]] = None,
 		on_new_topic: Optional[Callable[[TopicInfo], Awaitable[None] | None]] = None,
-		on_update: Optional[Callable[[TopicInfo], Awaitable[None] | None]] = None,
+		on_update: Optional[Callable[[TopicUpdate], Awaitable[None] | None]] = None,
 		on_big_update: Optional[Callable[[Dict[str, Tuple[str, object]]], Awaitable[None] | None]] = None,
 	) -> None:
 		self.uri = uri
@@ -165,7 +184,7 @@ class OrchestratorClient:
 				if self._on_new_topic:
 					await maybe_await(self._on_new_topic(info))
 			elif kind == "update":
-				info, _ = _parse_topic_info(payload, 0)
+				info = _parse_update(payload)
 				if self._on_update:
 					await maybe_await(self._on_update(info))
 			elif kind == "big_update":
