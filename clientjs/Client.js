@@ -112,6 +112,86 @@ function registerMsgDefinition(typeName, msgText) {
 	registerMessageSchema(typeName, fields);
 }
 
+async function _requestJson(method, url, body = undefined) {
+	if (typeof fetch === "function") {
+		const response = await fetch(url, {
+			method,
+			headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+			body: body === undefined ? undefined : JSON.stringify(body),
+		});
+		if (!response.ok) {
+			throw new Error(`HTTP ${response.status} ${response.statusText}`);
+		}
+		return response.json();
+	}
+
+	if (typeof window !== "undefined") {
+		throw new Error("No fetch implementation available in browser environment");
+	}
+
+	const http = require(url.startsWith("https:") ? "https" : "http");
+	return new Promise((resolve, reject) => {
+		const req = http.request(
+			url,
+			{
+				method,
+				headers: body === undefined ? {} : { "Content-Type": "application/json" },
+			},
+			(res) => {
+				let data = "";
+				res.setEncoding("utf8");
+				res.on("data", (chunk) => {
+					data += chunk;
+				});
+				res.on("end", () => {
+					const status = res.statusCode ?? 500;
+					if (status < 200 || status >= 300) {
+						reject(new Error(`HTTP ${status} ${res.statusMessage || ""}`));
+						return;
+					}
+					try {
+						resolve(JSON.parse(data || "{}"));
+					} catch (err) {
+						reject(err);
+					}
+				});
+			}
+		);
+
+		req.on("error", reject);
+		if (body !== undefined) {
+			req.write(JSON.stringify(body));
+		}
+		req.end();
+	});
+}
+
+async function syncTypesFromServer({ apiBase = "http://localhost:8090", since } = {}) {
+	const query = since ? `?since=${encodeURIComponent(since)}` : "";
+	const payload = await _requestJson("GET", `${apiBase.replace(/\/$/, "")}/api/types${query}`);
+	const loaded = [];
+	for (const item of payload.types || []) {
+		if (!item || typeof item.type !== "string" || typeof item.definition !== "string") continue;
+		registerMsgDefinition(item.type, item.definition);
+		loaded.push(item.type);
+	}
+	return { count: loaded.length, types: loaded };
+}
+
+async function syncTypesToServer(types, { apiBase = "http://localhost:8090" } = {}) {
+	const entries = Array.isArray(types)
+		? types
+		: Object.entries(types || {}).map(([type, definition]) => ({ type, definition }));
+
+	const payload = {
+		types: entries
+			.filter((item) => item && typeof item.type === "string" && typeof item.definition === "string")
+			.map((item) => ({ type: item.type, definition: item.definition })),
+	};
+
+	return _requestJson("POST", `${apiBase.replace(/\/$/, "")}/api/types/sync`, payload);
+}
+
 function _decodePrimitive(typeName, bytes, offset) {
 	const t = typeName.toLowerCase();
 	const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -470,6 +550,14 @@ class Client {
 		await this._send(out);
 	}
 
+	async syncTypesFromServer(options = {}) {
+		return syncTypesFromServer(options);
+	}
+
+	async syncTypesToServer(types, options = {}) {
+		return syncTypesToServer(types, options);
+	}
+
 	async _connect() {
 		await new Promise((resolve, reject) => {
 			const ws = new WebSocketImpl(this.url);
@@ -588,7 +676,9 @@ if (typeof module !== "undefined" && module.exports) {
 		decodeValue,
 		registerMessageSchema,
 		registerMsgDefinition,
-		registerMsgDefinitionFromFile
+		registerMsgDefinitionFromFile,
+		syncTypesFromServer,
+		syncTypesToServer,
 	};
 }
 
@@ -600,6 +690,8 @@ if (typeof window !== "undefined") {
 		decodeValue,
 		registerMessageSchema,
 		registerMsgDefinition,
-		registerMsgDefinitionFromFile
+		registerMsgDefinitionFromFile,
+		syncTypesFromServer,
+		syncTypesToServer,
 	};
 }

@@ -8,6 +8,7 @@ import serialization as s
 
 async def main() -> None:
     root = Path(__file__).resolve().parents[1] / "messages"
+    await client.sync_types_folder_to_server(root, api_base="http://localhost:8090")
     s.load_message_root(root)
 
     oc = client.OrchestratorClient()

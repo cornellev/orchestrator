@@ -1,6 +1,10 @@
 import asyncio
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from websockets.asyncio.client import connect
 
@@ -221,3 +225,70 @@ class OrchestratorClient:
 async def maybe_await(result) -> None:
 	if asyncio.iscoroutine(result):
 		await result
+
+
+def _http_json(method: str, url: str, body: Optional[dict] = None) -> dict:
+	data = None
+	headers = {}
+	if body is not None:
+		data = json.dumps(body).encode("utf-8")
+		headers["Content-Type"] = "application/json"
+
+	req = Request(url, data=data, headers=headers, method=method)
+	with urlopen(req, timeout=10) as response:
+		raw = response.read().decode("utf-8")
+		return json.loads(raw)
+
+
+def _collect_msg_definitions(folder: Path) -> Dict[str, str]:
+	if not folder.exists() or not folder.is_dir():
+		raise FileNotFoundError(folder)
+
+	result: Dict[str, str] = {}
+	for package_dir in sorted(folder.iterdir()):
+		if not package_dir.is_dir():
+			continue
+		msg_dir = package_dir / "msg"
+		if not msg_dir.is_dir():
+			continue
+		for msg_file in sorted(msg_dir.glob("*.msg")):
+			type_name = f"{package_dir.name}/{msg_file.stem}"
+			result[type_name] = msg_file.read_text(encoding="utf-8")
+	return result
+
+
+async def sync_types_from_server(api_base: str = "http://localhost:8090", since: Optional[str] = None) -> Dict[str, str]:
+	def _work() -> Dict[str, str]:
+		query = ""
+		if since:
+			query = "?" + urlencode({"since": since})
+		payload = _http_json("GET", f"{api_base.rstrip('/')}/api/types{query}")
+		loaded: Dict[str, str] = {}
+		for item in payload.get("types", []):
+			type_name = item.get("type")
+			definition = item.get("definition")
+			if not isinstance(type_name, str) or not isinstance(definition, str):
+				continue
+			s.load_message_definition(type_name, definition)
+			loaded[type_name] = definition
+		return loaded
+
+	return await asyncio.to_thread(_work)
+
+
+async def sync_types_to_server(type_definitions: Dict[str, str], api_base: str = "http://localhost:8090") -> dict:
+	def _work() -> dict:
+		payload = {
+			"types": [
+				{"type": type_name, "definition": definition}
+				for type_name, definition in type_definitions.items()
+			]
+		}
+		return _http_json("POST", f"{api_base.rstrip('/')}/api/types/sync", payload)
+
+	return await asyncio.to_thread(_work)
+
+
+async def sync_types_folder_to_server(folder: str | Path, api_base: str = "http://localhost:8090") -> dict:
+	definitions = await asyncio.to_thread(_collect_msg_definitions, Path(folder))
+	return await sync_types_to_server(definitions, api_base=api_base)

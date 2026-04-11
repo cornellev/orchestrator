@@ -1,31 +1,13 @@
-const { Client, registerMsgDefinition } = require("./Client");
-
-registerMsgDefinition(
-  "geometry_msgs/Point32",
-  `
-float32 x
-float32 y
-float32 z
-`
-);
-
-registerMsgDefinition(
-  "sensor_msgs/PointCloud",
-  `
-geometry_msgs/Point32[] points
-`
-);
-
-registerMsgDefinition(
-  "sensor_msgs/PointCloud2Lite",
-  `
-uint32 width
-uint8[] data
-bool is_dense
-`
-);
+const { Client, syncTypesFromServer } = require("./Client");
 
 (async () => {
+  try {
+    const synced = await syncTypesFromServer({ apiBase: "http://localhost:8090" });
+    console.log(`synced ${synced.count} message type(s) from server`);
+  } catch (err) {
+    console.warn("type sync skipped:", err.message);
+  }
+
   const c = new Client({
     url: "ws://localhost:8080",
     onUpdate: (info) => {

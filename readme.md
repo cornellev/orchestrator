@@ -240,6 +240,45 @@ Programmatic loading APIs in `serialization.py`:
 - `load_message_folder(path, package=None)`
 - `load_message_root(path)`
 
+REST API for custom type sync
+-----------------------------
+
+Server now starts a REST API on `http://localhost:8090` for managing custom message definitions.
+
+Endpoints:
+
+- `GET /api/types`
+	- Pull all known custom message types.
+- `GET /api/types?since=<ISO_TIMESTAMP>`
+	- Pull only types updated after `since`.
+- `GET /api/types/<package>/<MessageName>`
+	- Fetch one message definition.
+- `PUT /api/types/<package>/<MessageName>`
+	- Save/update one message definition.
+	- JSON body: `{ "definition": "... .msg text ..." }`
+- `POST /api/types/sync`
+	- Push many definitions in one request.
+	- JSON body: `{ "types": [{"type":"pkg/Msg", "definition":"..."}] }`
+
+Saved definitions are persisted under `./custom_types/<package>/msg/*.msg` and loaded into runtime parsing immediately.
+
+Client sync helpers
+-------------------
+
+JavaScript (`clientjs/Client.js`):
+
+- `syncTypesFromServer({ apiBase, since })`
+- `syncTypesToServer(types, { apiBase })`
+- `Client` instance methods with the same names are also available.
+
+Python (`client/client.py`):
+
+- `sync_types_from_server(api_base="http://localhost:8090", since=None)`
+- `sync_types_to_server(type_definitions, api_base="http://localhost:8090")`
+- `sync_types_folder_to_server(folder, api_base="http://localhost:8090")`
+
+`clientjs/test.js` now pulls message definitions from the REST API before subscribing.
+
 Publish payload shape for custom messages:
 
 - Use Python dictionaries keyed by field name.

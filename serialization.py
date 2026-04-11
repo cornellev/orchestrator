@@ -126,17 +126,14 @@ def register_message_type(type_name: str, fields: list[FieldDef]):
     message_registry[normalized] = MessageDef(type_name=normalized, fields=tuple(fields))
 
 
-def load_message_file(file_path: Union[str, os.PathLike], package: Optional[str] = None):
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(path)
+def load_message_definition(type_name: str, definition: str):
+    if "/" not in type_name:
+        raise ValueError("Type name must be in the form 'package/MessageName'")
 
-    inferred_package = package or path.parent.parent.name
-    msg_name = path.stem
-    full_type = f"{inferred_package}/{msg_name}"
-
+    package_name = type_name.split("/", 1)[0]
     fields: list[FieldDef] = []
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+
+    for raw_line in definition.splitlines():
         line = raw_line.split("#", 1)[0].strip()
         if not line:
             continue
@@ -149,11 +146,22 @@ def load_message_file(file_path: Union[str, os.PathLike], package: Optional[str]
 
         type_token, name = parts[0], parts[1]
         base, is_array, fixed_len = _parse_field_type(type_token)
-        resolved_base = _normalize_type_name(base, inferred_package)
+        resolved_base = _normalize_type_name(base, package_name)
         fields.append(FieldDef(name=name, type_name=resolved_base, is_array=is_array, array_len=fixed_len))
 
-    register_message_type(full_type, fields)
-    return full_type
+    register_message_type(type_name, fields)
+    return _normalize_type_name(type_name)
+
+
+def load_message_file(file_path: Union[str, os.PathLike], package: Optional[str] = None):
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    inferred_package = package or path.parent.parent.name
+    msg_name = path.stem
+    full_type = f"{inferred_package}/{msg_name}"
+    return load_message_definition(full_type, path.read_text(encoding="utf-8"))
 
 
 def load_message_folder(folder_path: Union[str, os.PathLike], package: Optional[str] = None):
