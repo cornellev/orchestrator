@@ -49,10 +49,18 @@ def _build_topic_data(topic: str, type_str: str, data) -> bytes:
 def _parse_topic_info(buf: memoryview, offset: int) -> Tuple[TopicInfo, int]:
 	topic_id = int.from_bytes(buf[offset : offset + 4], byteorder="big")
 	type_byte = buf[offset + 4]
-	type_str = s.typeFromByte(type_byte)
-	count = int.from_bytes(buf[offset + 5 : offset + 9], byteorder="little")
-	name_len = buf[offset + 9]
-	start = offset + 10
+	dynamic_len = int.from_bytes(buf[offset + 5 : offset + 7], byteorder="little")
+	dynamic_start = offset + 7
+	dynamic_end = dynamic_start + dynamic_len
+
+	if type_byte == s.DYNAMIC_TYPE_BYTE:
+		type_str = bytes(buf[dynamic_start:dynamic_end]).decode("utf-8")
+	else:
+		type_str = s.typeFromByte(type_byte)
+
+	count = int.from_bytes(buf[dynamic_end : dynamic_end + 4], byteorder="little")
+	name_len = buf[dynamic_end + 4]
+	start = dynamic_end + 5
 	end = start + name_len
 	name = bytes(buf[start:end]).decode("utf-8")
 	return TopicInfo(topic_id=topic_id, type_str=type_str, count=count, name=name), end

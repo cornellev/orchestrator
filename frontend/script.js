@@ -1,4 +1,3 @@
-
 document.addEventListener("DOMContentLoaded", () => {
 	if (!window.ROSClient || !window.ROSClient.Client) {
 		console.error("ROSClient.Client is not available. Check that clientjs/Client.js is loaded.");
@@ -6,10 +5,8 @@ document.addEventListener("DOMContentLoaded", () => {
 	}
 
 	const { Client } = window.ROSClient;
+	const topics = new Map();
 
-	const topics = new Map(); // name -> { type, value, updatedAt }
-
-	// --- Build UI ---
 	const container = document.createElement("div");
 	container.className = "container py-4";
 	container.innerHTML = `
@@ -49,18 +46,19 @@ document.addEventListener("DOMContentLoaded", () => {
 					</div>
 					<div class="mb-3">
 						<label for="topic-type" class="form-label">Type</label>
-						<select id="topic-type" class="form-select" required>
-							<option value="std_msgs/String">std_msgs/String</option>
-							<option value="std_msgs/Int32">std_msgs/Int32</option>
-							<option value="std_msgs/Float32">std_msgs/Float32</option>
-							<option value="std_msgs/Bool">std_msgs/Bool</option>
-						</select>
-						<div class="form-text">For existing topics, the stored type will be used.</div>
+						<input id="topic-type" class="form-control" list="type-list" value="std_msgs/String" required />
+						<datalist id="type-list">
+							<option value="std_msgs/String"></option>
+							<option value="std_msgs/Int32"></option>
+							<option value="std_msgs/Float32"></option>
+							<option value="std_msgs/Bool"></option>
+						</datalist>
+						<div class="form-text">Existing topics keep their current type. Custom types are supported.</div>
 					</div>
 					<div class="mb-3">
 						<label for="topic-value" class="form-label">Value</label>
-						<input id="topic-value" class="form-control" placeholder="Enter value" />
-						<div class="form-text">Booleans: true/false. Numbers: use plain numeric values.</div>
+						<textarea id="topic-value" class="form-control" rows="5" placeholder='For custom types use JSON, e.g. {"x":1.0,"y":2.0,"z":3.0}'></textarea>
+						<div class="form-text">Primitives: plain values. Objects/arrays: valid JSON.</div>
 					</div>
 					<button type="submit" class="btn btn-success">Publish</button>
 					<div id="publish-status" class="mt-2 small text-muted"></div>
@@ -68,14 +66,14 @@ document.addEventListener("DOMContentLoaded", () => {
 			</div>
 		</div>
 	`;
-	
+
 	document.body.prepend(container);
 
 	const topicsBody = document.getElementById("topics-body");
 	const datalist = document.getElementById("topic-list");
 	const form = document.getElementById("publish-form");
 	const topicNameInput = document.getElementById("topic-name");
-	const typeSelect = document.getElementById("topic-type");
+	const typeInput = document.getElementById("topic-type");
 	const valueInput = document.getElementById("topic-value");
 	const publishStatus = document.getElementById("publish-status");
 	const statusEl = document.getElementById("connection-status");
@@ -83,8 +81,39 @@ document.addEventListener("DOMContentLoaded", () => {
 	const btnEcho = document.getElementById("btn-echo");
 	const btnRequestAll = document.getElementById("btn-request-all");
 
+	function escapeHtml(text) {
+		return String(text)
+			.replaceAll("&", "&amp;")
+			.replaceAll("<", "&lt;")
+			.replaceAll(">", "&gt;")
+			.replaceAll('"', "&quot;")
+			.replaceAll("'", "&#039;");
+	}
+
+	function toReadable(value) {
+		if (value === null || value === undefined) return "";
+		if (typeof value === "bigint") return value.toString();
+		if (value instanceof Uint8Array) return `Uint8Array(${value.length}) [${Array.from(value).slice(0, 32).join(",")}${value.length > 32 ? ",..." : ""}]`;
+		if (Array.isArray(value)) return value.map((item) => (typeof item === "bigint" ? item.toString() : item));
+		if (typeof value === "object") {
+			const out = {};
+			for (const [key, val] of Object.entries(value)) {
+				out[key] = typeof val === "bigint" ? val.toString() : toReadable(val);
+			}
+			return out;
+		}
+		return value;
+	}
+
+	function formatValueForCell(value) {
+		const readable = toReadable(value);
+		if (typeof readable === "string" || typeof readable === "number" || typeof readable === "boolean") {
+			return `<span>${escapeHtml(String(readable))}</span>`;
+		}
+		return `<pre class="mb-0" style="white-space:pre-wrap">${escapeHtml(JSON.stringify(readable, null, 2))}</pre>`;
+	}
+
 	function renderTopics() {
-		// Clear table and datalist
 		topicsBody.innerHTML = "";
 		datalist.innerHTML = "";
 
@@ -92,14 +121,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
 		for (const [name, info] of sorted) {
 			const tr = document.createElement("tr");
-			const lastVal = info.value === undefined ? "" : String(info.value);
 			const updated = info.updatedAt ? new Date(info.updatedAt).toLocaleTimeString() : "";
 
 			tr.innerHTML = `
-				<td>${name}</td>
-				<td><code>${info.type || ""}</code></td>
-				<td>${lastVal}</td>
-				<td>${updated}</td>
+				<td>${escapeHtml(name)}</td>
+				<td><code>${escapeHtml(info.type || "")}</code></td>
+				<td>${formatValueForCell(info.value)}</td>
+				<td>${escapeHtml(updated)}</td>
 			`;
 			topicsBody.appendChild(tr);
 
@@ -114,36 +142,31 @@ document.addEventListener("DOMContentLoaded", () => {
 		statusEl.className = `align-self-center text-${variant}`;
 	}
 
-	function coerceValue(type, raw) {
-		if (raw === "" || raw == null) return null;
-		switch (type) {
-			case "std_msgs/Int32":
-				return parseInt(raw, 10);
-			case "std_msgs/Float32":
-				return parseFloat(raw);
-			case "std_msgs/Bool":
-				return /^true$/i.test(raw) || raw === "1";
-			default:
-				return raw;
+	function parseInputValue(type, raw) {
+		const value = (raw || "").trim();
+		if (!value) return null;
+		if (type === "std_msgs/Int32") return parseInt(value, 10);
+		if (type === "std_msgs/Float32") return parseFloat(value);
+		if (type === "std_msgs/Bool") return /^true$/i.test(value) || value === "1";
+
+		if (type.startsWith("std_msgs/")) {
+			return value;
 		}
+
+		if (value.startsWith("{") || value.startsWith("[")) {
+			return JSON.parse(value);
+		}
+		return value;
 	}
 
-	// --- WebSocket client ---
 	const client = new Client({
 		url: `ws://${location.hostname}:8080`,
-		onOpen: () => {
-			setStatus("Connected", "success");
-		},
-		onClose: () => {
-			setStatus("Disconnected", "muted");
-		},
+		onOpen: () => setStatus("Connected", "success"),
+		onClose: () => setStatus("Disconnected", "muted"),
 		onEcho: async (list) => {
 			for (const info of list) {
 				const existing = topics.get(info.name) || {};
-				topics.set(info.name, {
-					...existing,
-					type: info.typeStr,
-				});
+				topics.set(info.name, { ...existing, type: info.typeStr });
 			}
 			renderTopics();
 		},
@@ -161,15 +184,10 @@ document.addEventListener("DOMContentLoaded", () => {
 			topics.set(info.name, {
 				...existing,
 				type: info.typeStr,
+				value: info.value,
 				updatedAt: Date.now(),
 			});
 			renderTopics();
-			// Refresh values after an update so we show live data
-			try {
-				await client.requestAll();
-			} catch (e) {
-				console.error("Failed to request all after update", e);
-			}
 		},
 		onBigUpdate: async (updates) => {
 			const now = Date.now();
@@ -186,15 +204,12 @@ document.addEventListener("DOMContentLoaded", () => {
 		},
 	});
 
-	// Start connection when user clicks connect
 	btnConnect.addEventListener("click", () => {
 		setStatus("Connecting...", "warning");
-		client
-			.start()
-			.catch((err) => {
-				console.error("Client stopped with error", err);
-				setStatus("Error - see console", "danger");
-			});
+		client.start().catch((err) => {
+			console.error("Client stopped with error", err);
+			setStatus("Error - see console", "danger");
+		});
 	});
 
 	btnEcho.addEventListener("click", async () => {
@@ -224,28 +239,31 @@ document.addEventListener("DOMContentLoaded", () => {
 		const name = topicNameInput.value.trim();
 		if (!name) return;
 
-		let type = typeSelect.value;
+		let type = typeInput.value.trim();
 		const existing = topics.get(name);
 		if (existing && existing.type) {
-			// Enforce existing topic type
 			type = existing.type;
 		}
 
-		const rawVal = valueInput.value.trim();
-		const coerced = coerceValue(type, rawVal);
+		let coerced;
+		try {
+			coerced = parseInputValue(type, valueInput.value);
+		} catch (err) {
+			publishStatus.textContent = "Invalid JSON for custom message value";
+			publishStatus.className = "mt-2 small text-danger";
+			return;
+		}
 
 		try {
 			await client.publish(name, type, coerced);
 			publishStatus.textContent = `Published to ${name}`;
 			publishStatus.className = "mt-2 small text-success";
 
-			// Optimistically update local view
-			const now = Date.now();
 			topics.set(name, {
 				...(existing || {}),
 				type,
 				value: coerced,
-				updatedAt: now,
+				updatedAt: Date.now(),
 			});
 			renderTopics();
 		} catch (e) {
@@ -255,4 +273,3 @@ document.addEventListener("DOMContentLoaded", () => {
 		}
 	});
 });
-

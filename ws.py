@@ -171,6 +171,9 @@ class ROSSim:
         type_str = self.get_topic_type(topic_name)
         data = self.get_topic_data(topic_name)
         type_byte = s.type_encoder(type_str)
+        dynamic_type_name = b""
+        if type_byte == s.DYNAMIC_TYPE_BYTE:
+            dynamic_type_name = type_str.encode('utf-8')
         count = 0
         if data is not None:
             encoded = s.encode(type_str, data)
@@ -180,6 +183,8 @@ class ROSSim:
         d = bytearray()
         d.extend(self.topicMap[topic_name]) # topic identifier (4 bytes)
         d.append(type_byte) # type byte
+        d.extend(len(dynamic_type_name).to_bytes(2, byteorder='little')) # optional dynamic type name length
+        d.extend(dynamic_type_name) # optional dynamic type name bytes
         d.extend(count.to_bytes(4, byteorder='little')) # count
         d.extend(len(topic).to_bytes(1, byteorder='little')) # topic name length
         d.extend(topic) # topic name data

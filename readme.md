@@ -79,6 +79,24 @@ Publishing from JavaScript:
 client.publish("/example", "std_msgs/String", "hello from JS");
 ```
 
+Decoding custom dynamic message types in JavaScript:
+
+```js
+const { Client, registerMsgDefinition } = window.ROSClient;
+
+registerMsgDefinition("geometry_msgs/Point32", `
+float32 x
+float32 y
+float32 z
+`);
+
+registerMsgDefinition("sensor_msgs/PointCloud", `
+geometry_msgs/Point32[] points
+`);
+
+// now onUpdate/onBigUpdate values for sensor_msgs/PointCloud are JS objects
+```
+
 Available standard types include (see `TYPE_ENCODERS` in `Client.js`):
 
 - `std_msgs/String`
@@ -143,6 +161,36 @@ if __name__ == "__main__":
 		asyncio.run(main())
 ```
 
+Custom point cloud demo
+-----------------------
+
+This repo includes sample dynamic message files:
+
+- [messages/geometry_msgs/msg/Point32.msg](messages/geometry_msgs/msg/Point32.msg)
+- [messages/sensor_msgs/msg/PointCloud.msg](messages/sensor_msgs/msg/PointCloud.msg)
+
+To test custom decoding end-to-end:
+
+1. Start server:
+
+```bash
+python main.py
+```
+
+2. In another terminal, start JS test subscriber (registers custom schemas and prints decoded objects):
+
+```bash
+node clientjs/test.js
+```
+
+3. In another terminal, publish sample point clouds:
+
+```bash
+python client/demo_custom_publish.py
+```
+
+You should see `sensor_msgs/PointCloud` updates rendered as readable nested objects (not raw bytes).
+
 Client operations
 -----------------
 
@@ -173,7 +221,49 @@ Development notes
 	- Python: `serialization.py` (functions `encode`, `decode`, `typeFromByte`).
 - The WebSocket server entrypoint is `main.py`, which delegates to `ws.WebSocketServer`.
 
+Dynamic `.msg` type support
+---------------------------
+
+`serialization.py` now supports dynamic ROS-style message schemas (nested messages, variable/fixed arrays, `uint8[]` payloads, etc.).
+
+How to load message definitions:
+
+- Auto-discovery on startup (if present):
+	- `./messages/<package>/msg/*.msg`
+	- `./msgs/<package>/msg/*.msg`
+	- `./msg/*.msg` (single-package flat folder)
+- Or set `ORCH_MSG_PATHS` (OS path-separated list) to one or more roots/folders.
+
+Programmatic loading APIs in `serialization.py`:
+
+- `load_message_file(path, package=None)`
+- `load_message_folder(path, package=None)`
+- `load_message_root(path)`
+
+Publish payload shape for custom messages:
+
+- Use Python dictionaries keyed by field name.
+- For arrays, pass Python lists (`uint8[]`/`byte[]` can be `bytes`/`bytearray`).
+
+Example:
+
+```python
+import serialization as s
+
+s.load_message_root("./messages")
+encoded = s.encode("sensor_msgs/PointCloud2", {
+		"height": 1,
+		"width": 100,
+		"fields": [],
+		"is_bigendian": False,
+		"point_step": 16,
+		"row_step": 1600,
+		"data": b"...",
+		"is_dense": True,
+})
+```
+
 This README is based on the behavior of `Client.js`, `client/client.py`, and the server started by running `main.py`.
 
 
-- TODO: Add more custom types and support for arrays, nested messages, etc.
+- TODO: Add optional JS custom-message codec generation from `.msg` files.

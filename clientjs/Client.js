@@ -35,8 +35,174 @@ const TYPE_DECODERS = Object.entries(TYPE_ENCODERS).reduce((acc, [k, v]) => {
 	return acc;
 }, {});
 
+const DYNAMIC_TYPE_BYTE = 0xff;
+const DYNAMIC_SCHEMAS = new Map();
+const STD_ALIASES = {
+	"std_msgs/String": "string",
+	"std_msgs/Int32": "int32",
+	"std_msgs/Float32": "float32",
+	"std_msgs/Bool": "bool",
+	"std_msgs/Float64": "float64",
+	"std_msgs/Int64": "int64",
+	"std_msgs/UInt32": "uint32",
+	"std_msgs/UInt64": "uint64",
+	"std_msgs/Byte": "byte",
+	"std_msgs/Char": "char",
+	"std_msgs/Duration": "duration",
+};
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+function normalizeTypeName(typeName, packageName) {
+	if (!typeName) return typeName;
+	if (typeName.includes("/")) return typeName;
+	const primitive = typeName.toLowerCase();
+	if (["string", "bool", "byte", "char", "duration", "time", "int8", "uint8", "int16", "uint16", "int32", "uint32", "int64", "uint64", "float32", "float64"].includes(primitive)) {
+		return primitive;
+	}
+	return packageName ? `${packageName}/${typeName}` : typeName;
+}
+
+function parseFieldType(typeToken, packageName) {
+	const m = /^([A-Za-z0-9_/]+)(\[(\d*)\])?$/.exec(typeToken.trim());
+	if (!m) throw new Error(`Invalid field type token '${typeToken}'`);
+	return {
+		typeName: normalizeTypeName(m[1], packageName),
+		isArray: Boolean(m[2]),
+		arrayLen: m[3] ? Number(m[3]) : null,
+	};
+}
+
+function registerMessageSchema(typeName, fields) {
+	const packageName = typeName.includes("/") ? typeName.split("/")[0] : null;
+	const normalizedType = normalizeTypeName(typeName, packageName);
+	const normalizedFields = fields.map((f) => ({
+		name: f.name,
+		typeName: normalizeTypeName(f.typeName, packageName),
+		isArray: Boolean(f.isArray),
+		arrayLen: Number.isInteger(f.arrayLen) ? f.arrayLen : null,
+	}));
+	DYNAMIC_SCHEMAS.set(normalizedType, normalizedFields);
+}
+
+async function registerMsgDefinitionFromFile(typeName, fileText) {
+	const data = await fetch(fileText);
+	if (!data.ok) throw new Error(`Failed to load message definition from ${fileText}: ${data.status} ${data.statusText}`);
+	const text = await data.text();
+	registerMsgDefinition(typeName, text);
+}
+
+function registerMsgDefinition(typeName, msgText) {
+	const packageName = typeName.includes("/") ? typeName.split("/")[0] : null;
+	const fields = [];
+	for (const rawLine of msgText.split(/\r?\n/)) {
+		const line = rawLine.split("#", 1)[0].trim();
+		if (!line || line.includes("=")) continue;
+		const parts = line.split(/\s+/);
+		if (parts.length < 2) continue;
+		const fieldType = parseFieldType(parts[0], packageName);
+		fields.push({
+			name: parts[1],
+			typeName: fieldType.typeName,
+			isArray: fieldType.isArray,
+			arrayLen: fieldType.arrayLen,
+		});
+	}
+	registerMessageSchema(typeName, fields);
+}
+
+function _decodePrimitive(typeName, bytes, offset) {
+	const t = typeName.toLowerCase();
+	const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	switch (t) {
+		case "string": {
+			const n = dv.getUint32(offset, true);
+			const start = offset + 4;
+			const end = start + n;
+			return { value: decoder.decode(bytes.subarray(start, end)), next: end };
+		}
+		case "bool":
+			return { value: bytes[offset] !== 0, next: offset + 1 };
+		case "int8":
+		case "char":
+			return { value: dv.getInt8(offset), next: offset + 1 };
+		case "uint8":
+		case "byte":
+			return { value: dv.getUint8(offset), next: offset + 1 };
+		case "int16":
+			return { value: dv.getInt16(offset, true), next: offset + 2 };
+		case "uint16":
+			return { value: dv.getUint16(offset, true), next: offset + 2 };
+		case "int32":
+			return { value: dv.getInt32(offset, true), next: offset + 4 };
+		case "uint32":
+			return { value: dv.getUint32(offset, true), next: offset + 4 };
+		case "int64":
+			return { value: dv.getBigInt64(offset, true), next: offset + 8 };
+		case "uint64":
+			return { value: dv.getBigUint64(offset, true), next: offset + 8 };
+		case "float32":
+			return { value: dv.getFloat32(offset, true), next: offset + 4 };
+		case "float64":
+			return { value: dv.getFloat64(offset, true), next: offset + 8 };
+		case "duration": {
+			const sec = dv.getInt32(offset, true);
+			const nsec = dv.getInt32(offset + 4, true);
+			return { value: sec + nsec / 1e9, next: offset + 8 };
+		}
+		case "time": {
+			const sec = dv.getUint32(offset, true);
+			const nsec = dv.getUint32(offset + 4, true);
+			return { value: { sec, nsec }, next: offset + 8 };
+		}
+		default:
+			return null;
+	}
+}
+
+function _decodeTypedValue(typeName, bytes, offset = 0) {
+	const normalized = STD_ALIASES[typeName] ?? normalizeTypeName(typeName, null);
+	const primitive = _decodePrimitive(normalized, bytes, offset);
+	if (primitive) return primitive;
+
+	const schema = DYNAMIC_SCHEMAS.get(normalized);
+	if (!schema) return null;
+
+	let cursor = offset;
+	const obj = {};
+	for (const field of schema) {
+		if (field.isArray) {
+			let count = field.arrayLen;
+			if (count == null) {
+				count = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(cursor, true);
+				cursor += 4;
+			}
+
+			if ((field.typeName === "uint8" || field.typeName === "byte") && Number.isInteger(count)) {
+				obj[field.name] = bytes.subarray(cursor, cursor + count);
+				cursor += count;
+				continue;
+			}
+
+			const arr = [];
+			for (let i = 0; i < count; i += 1) {
+				const decoded = _decodeTypedValue(field.typeName, bytes, cursor);
+				if (!decoded) return null;
+				arr.push(decoded.value);
+				cursor = decoded.next;
+			}
+			obj[field.name] = arr;
+		} else {
+			const decoded = _decodeTypedValue(field.typeName, bytes, cursor);
+			if (!decoded) return null;
+			obj[field.name] = decoded.value;
+			cursor = decoded.next;
+		}
+	}
+
+	return { value: obj, next: cursor };
+}
 
 function encodeValue(typeStr, value) {
 	const typeByte = TYPE_ENCODERS[typeStr];
@@ -111,11 +277,23 @@ function encodeValue(typeStr, value) {
 
 function decodeValue(view, offset) {
 	const typeByte = view[offset];
-	const typeStr = TYPE_DECODERS[typeByte];
-	if (!typeStr) throw new Error(`Unknown type byte ${typeByte}`);
 	const count = new DataView(view.buffer, view.byteOffset).getUint32(offset + 1, true);
 	const start = offset + 5;
 	const slice = view.subarray(start, start + count);
+
+	if (typeByte === DYNAMIC_TYPE_BYTE) {
+		const nameLen = new DataView(slice.buffer, slice.byteOffset, slice.byteLength).getUint16(0, true);
+		const nameStart = 2;
+		const nameEnd = nameStart + nameLen;
+		const typeStr = decoder.decode(slice.subarray(nameStart, nameEnd));
+		const valueBytes = slice.subarray(nameEnd);
+		const decoded = _decodeTypedValue(typeStr, valueBytes, 0);
+		const readable = decoded && decoded.next === valueBytes.length ? decoded.value : valueBytes;
+		return { type: typeStr, value: readable, next: start + count };
+	}
+
+	const typeStr = TYPE_DECODERS[typeByte];
+	if (!typeStr) throw new Error(`Unknown type byte ${typeByte}`);
 	let value;
 	switch (typeStr) {
 		case "std_msgs/String":
@@ -175,10 +353,14 @@ function buildTopicData(topicName, typeStr, value) {
 function parseTopicInfo(view, offset) {
 	const topicId = new DataView(view.buffer, view.byteOffset).getUint32(offset, false);
 	const typeByte = view[offset + 4];
-	const typeStr = TYPE_DECODERS[typeByte];
-	const count = new DataView(view.buffer, view.byteOffset).getUint32(offset + 5, true);
-	const nameLen = view[offset + 9];
-	const nameStart = offset + 10;
+	const dynamicLen = new DataView(view.buffer, view.byteOffset).getUint16(offset + 5, true);
+	const dynamicStart = offset + 7;
+	const dynamicEnd = dynamicStart + dynamicLen;
+	const typeStr =
+		typeByte === DYNAMIC_TYPE_BYTE ? decoder.decode(view.subarray(dynamicStart, dynamicEnd)) : TYPE_DECODERS[typeByte];
+	const count = new DataView(view.buffer, view.byteOffset).getUint32(dynamicEnd, true);
+	const nameLen = view[dynamicEnd + 4];
+	const nameStart = dynamicEnd + 5;
 	const nameEnd = nameStart + nameLen;
 	const name = decoder.decode(view.subarray(nameStart, nameEnd));
 	return { topicId, typeStr, count, name, next: nameEnd };
@@ -399,7 +581,15 @@ function wait(ms) {
 
 // Export for Node (CommonJS) and attach to window in browsers
 if (typeof module !== "undefined" && module.exports) {
-	module.exports = { Client, buildTopicData, encodeValue, decodeValue };
+	module.exports = {
+		Client,
+		buildTopicData,
+		encodeValue,
+		decodeValue,
+		registerMessageSchema,
+		registerMsgDefinition,
+		registerMsgDefinitionFromFile
+	};
 }
 
 if (typeof window !== "undefined") {
@@ -408,5 +598,8 @@ if (typeof window !== "undefined") {
 		buildTopicData,
 		encodeValue,
 		decodeValue,
+		registerMessageSchema,
+		registerMsgDefinition,
+		registerMsgDefinitionFromFile
 	};
 }
