@@ -17,8 +17,10 @@ class CustomTypeSerializationTests(unittest.TestCase):
 
         geometry_msg = root / "geometry_msgs" / "msg"
         sensor_msg = root / "sensor_msgs" / "msg"
+        fusion_msg = root / "sensor_fusion_msgs" / "msg"
         geometry_msg.mkdir(parents=True)
         sensor_msg.mkdir(parents=True)
+        fusion_msg.mkdir(parents=True)
 
         (geometry_msg / "Point32.msg").write_text(
             """
@@ -43,6 +45,15 @@ geometry_msgs/Point32[] points
 uint32 width
 uint8[] data
 bool is_dense
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+        (fusion_msg / "StopSigns.msg").write_text(
+            """
+geometry_msgs/Point32[] positions
+geometry_msgs/Point32[] directions
 """.strip()
             + "\n",
             encoding="utf-8",
@@ -84,6 +95,40 @@ bool is_dense
         self.assertEqual(decoded_value["width"], 4)
         self.assertEqual(decoded_value["data"], bytes([1, 2, 3, 255]))
         self.assertTrue(decoded_value["is_dense"])
+
+    def test_multiple_arrays_message_round_trip(self):
+        value = {
+            "positions": [
+                {"x": 1.0, "y": 2.0, "z": 3.0},
+                {"x": 11.0, "y": 12.0, "z": 13.0},
+            ],
+            "directions": [
+                {"x": -1.0, "y": -2.0, "z": -3.0},
+                {"x": -11.0, "y": -12.0, "z": -13.0},
+            ],
+        }
+
+        encoded = s.encode("sensor_fusion_msgs/StopSigns", value)
+        decoded_type, decoded_value = s.decode(encoded)
+
+        self.assertEqual(decoded_type, "sensor_fusion_msgs/StopSigns")
+        self.assertEqual(len(decoded_value["positions"]), 2)
+        self.assertEqual(len(decoded_value["directions"]), 2)
+        self.assertAlmostEqual(decoded_value["positions"][1]["x"], 11.0, places=5)
+        self.assertAlmostEqual(decoded_value["positions"][1]["y"], 12.0, places=5)
+        self.assertAlmostEqual(decoded_value["positions"][1]["z"], 13.0, places=5)
+        self.assertAlmostEqual(decoded_value["directions"][1]["x"], -11.0, places=5)
+        self.assertAlmostEqual(decoded_value["directions"][1]["y"], -12.0, places=5)
+        self.assertAlmostEqual(decoded_value["directions"][1]["z"], -13.0, places=5)
+
+    def test_std_msgs_byte_top_level_round_trip(self):
+        payload = bytes([0, 1, 2, 3, 255])
+
+        encoded = s.encode("std_msgs/Byte", payload)
+        decoded_type, decoded_value = s.decode(encoded)
+
+        self.assertEqual(decoded_type, "std_msgs/Byte")
+        self.assertEqual(decoded_value, payload)
 
 
 if __name__ == "__main__":

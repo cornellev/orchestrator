@@ -382,6 +382,17 @@ def _decode_value_raw(type_name: str, data: bytes, offset: int):
 
 
 def encode(type_str, data):
+    if type_str == "std_msgs/Byte":
+        if data is None:
+            value_payload = b""
+        elif isinstance(data, (bytes, bytearray)):
+            value_payload = bytes(data)
+        elif isinstance(data, (list, tuple)):
+            value_payload = bytes(data)
+        else:
+            value_payload = bytes([int(data)])
+        return bytes([type_encoder(type_str)]) + len(value_payload).to_bytes(4, "little") + value_payload
+
     value_payload = _encode_value_raw(type_str, data)
 
     if type_str in type_encoders:
@@ -410,6 +421,8 @@ def decode(data: bytes):
         return type_name, value
 
     type_name = typeFromByte(type_byte)
+    if type_name == "std_msgs/Byte":
+        return type_name, bytes(payload)
     value = decode_typed(type_name, payload)
     return type_name, value
 

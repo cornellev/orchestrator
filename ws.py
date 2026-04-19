@@ -155,6 +155,15 @@ class ROSSim:
             topic_name, type_str, decoded = decode_topicData(data)
             if topic_name not in self.topics:
                 self.add_topic(topic_name, type_str)
+            else:
+                existing_type = self.topics.get(topic_name)
+                if existing_type != type_str:
+                    print(
+                        f"Type mismatch for topic '{topic_name}': existing={existing_type}, published={type_str}. "
+                        "Ignoring publish to avoid decoding corruption."
+                    )
+                    return
+
             self.update_topic(topic_name, decoded)
 
         if method == "request_all":

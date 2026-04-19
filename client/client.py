@@ -132,6 +132,21 @@ class OrchestratorClient:
 
 		self._want_subscribe = False
 
+	def load_custom_topics(self, folder: str | Path) -> list[str]:
+		"""Load ROS-style `.msg` schemas from a `messages/`-like folder.
+
+		Expected layout:
+		- <folder>/<package>/msg/*.msg
+
+		This registers message schemas with the shared `serialization` module so
+		`publish()` can encode dynamic message types.
+		"""
+		return s.load_message_root(Path(folder))
+
+	# Alias: some callers think in terms of "types" rather than "topics".
+	def load_custom_types(self, folder: str | Path) -> list[str]:
+		return self.load_custom_topics(folder)
+
 	async def start(self, auto_subscribe: bool = True) -> None:
 		self._stop.clear()
 		self._want_subscribe = auto_subscribe
