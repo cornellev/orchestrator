@@ -1,6 +1,8 @@
 import asyncio
+import threading
 from websockets.asyncio.server import serve
 from enum import Enum
+from typing import Optional, Callable, Any
 import serialization as s
 import names
 
@@ -19,14 +21,32 @@ responses = {
 }
 
 class WebSocketServer:
-    def __init__(self, host: str = "localhost", port: int = 8080) -> None:
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 8080,
+        *,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        on_client_publish=None,
+    ) -> None:
         self.host = host
         self.port = port
 
+        self.loop: Optional[asyncio.AbstractEventLoop] = loop
+        self._on_client_publish = on_client_publish
+
         self.clients = {} # maps connected clients with last interaction time
-        self.sim = ROSSim(self.broadcast)
+        self.sim: Optional[ROSSim] = None
 
         self.nicknames = {} # maps client websockets to random nicknames for easier debugging
+
+    def _ensure_sim(self) -> None:
+        if self.sim is not None:
+            return
+        if self.loop is None:
+            # Must be called while an event loop is running.
+            self.loop = asyncio.get_running_loop()
+        self.sim = ROSSim(self.broadcast, loop=self.loop, on_client_publish=self._on_client_publish)
 
     async def broadcast(self, data: bytes, targets=None):
         # use a copy to avoid RuntimeError if clients disconnect during iteration
@@ -40,6 +60,7 @@ class WebSocketServer:
                 self.clients.pop(client, None) # remove disconnected client
 
     async def handler(self, websocket):
+        self._ensure_sim()
         self.clients[websocket] = asyncio.get_event_loop().time() # store the time of connection
         nickname = names.generate_name()
         self.nicknames[websocket] = nickname
@@ -62,13 +83,15 @@ class WebSocketServer:
                     raise
         finally:
             self.clients.pop(websocket, None)
-            self.sim.unsubscribe(websocket)
+            if self.sim is not None:
+                self.sim.unsubscribe(websocket)
             print(f"Client disconnected: {nickname} ({websocket.remote_address})")
             # remove nickname mapping
             self.nicknames.pop(websocket, None)
 
 
     async def run(self) -> None:
+        self._ensure_sim()
         async with serve(self.handler, self.host, self.port):
             # Run forever until cancelled (e.g. Ctrl+C in main)
             await asyncio.Future()
@@ -96,8 +119,11 @@ def encode_topic_value(type_str: str, data):
     return s.encode(type_str, data)
 
 class ROSSim:
-    def __init__(self, broadcaster):
+    def __init__(self, broadcaster, *, loop: asyncio.AbstractEventLoop, on_client_publish=None):
         self.broadcast = broadcaster
+        self.loop = loop
+        self._loop_thread_id = threading.get_ident()
+        self._on_client_publish = on_client_publish
 
         self.topics = {} # topic_name -> type_str
         self.topic_order = [] # preserve insertion order
@@ -109,6 +135,13 @@ class ROSSim:
         self.subscribers = set() # websockets that have subscribed to topics
 
     def add_topic(self, topic_name: str, type_str: str):
+        # Thread-safe: ROS callbacks may call this off the asyncio loop thread.
+        if threading.get_ident() != self._loop_thread_id:
+            self.loop.call_soon_threadsafe(self._add_topic, topic_name, type_str)
+            return
+        self._add_topic(topic_name, type_str)
+
+    def _add_topic(self, topic_name: str, type_str: str):
         if topic_name in self.topics:
             return
 
@@ -122,6 +155,13 @@ class ROSSim:
         asyncio.create_task(self.notifyNewTopic(topic_name))
 
     def update_topic(self, topic_name: str, data):
+        # Thread-safe: ROS callbacks may call this off the asyncio loop thread.
+        if threading.get_ident() != self._loop_thread_id:
+            self.loop.call_soon_threadsafe(self._update_topic, topic_name, data)
+            return
+        self._update_topic(topic_name, data)
+
+    def _update_topic(self, topic_name: str, data):
         if topic_name in self.topics:
             self.data[topic_name] = data
             asyncio.create_task(self.notifyTopicUpdate(topic_name))
@@ -163,6 +203,12 @@ class ROSSim:
                         "Ignoring publish to avoid decoding corruption."
                     )
                     return
+
+            if self._on_client_publish is not None:
+                try:
+                    self._on_client_publish(topic_name, type_str, decoded)
+                except Exception as exc:
+                    print(f"on_client_publish hook error for topic '{topic_name}': {exc}")
 
             self.update_topic(topic_name, decoded)
 

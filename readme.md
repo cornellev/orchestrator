@@ -37,6 +37,26 @@ WebSocket server started on ws://localhost:8080
 
 Stop the server with Ctrl+C.
 
+Configuration (env vars)
+------------------------
+
+The server supports two runtime modes:
+
+- **Standalone (default):** WebSocket + Types API only; no ROS required.
+- **ROS2 bridge (opt-in):** Enables an auto-discovery ROS 2 (rclpy) topic bridge.
+
+Common env vars:
+
+- `WS_HOST` / `WS_PORT` (default `localhost:8080`)
+- `API_HOST` / `API_PORT` (default `localhost:8090`)
+- `CUSTOM_TYPES_DIR` (default `custom_types`)
+
+ROS2 bridge env vars (only used if `ROS_ENABLED=true`):
+
+- `ROS_ENABLED` (default `false`)
+- `ROS_NODE_NAME` (default `orchestrator_bridge`)
+- `ROS_DISCOVERY_PERIOD_SEC` (default `1.0`)
+
 JavaScript client (browser or Node)
 -----------------------------------
 
@@ -258,6 +278,41 @@ Endpoints:
 	- JSON body: `{ "definition": "... .msg text ..." }`
 - `POST /api/types/sync`
 	- Push many definitions in one request.
+
+ROS2 bridge mode
+----------------
+
+If you have a ROS 2 Python environment available (i.e., `import rclpy` works):
+
+```bash
+ROS_ENABLED=true python main.py
+```
+
+Behavior:
+
+- The bridge auto-discovers ROS 2 topics and mirrors them into the WebSocket server.
+- WebSocket `publish` calls forward into ROS 2 as publishers.
+
+Notes:
+
+- On macOS, ROS 2 discovery from Docker Desktop to a host ROS graph can be unreliable (DDS/networking). For best results, run the bridge in the same ROS environment as the nodes you want to bridge.
+
+Docker
+------
+
+Standalone container:
+
+```bash
+docker build -t orchestrator .
+docker run --rm -p 8080:8080 -p 8090:8090 orchestrator
+```
+
+ROS2 bridge container:
+
+```bash
+docker build -f Dockerfile.ros2 -t orchestrator-ros2 .
+docker run --rm -p 8080:8080 -p 8090:8090 orchestrator-ros2
+```
 	- JSON body: `{ "types": [{"type":"pkg/Msg", "definition":"..."}] }`
 
 Saved definitions are persisted under `./custom_types/<package>/msg/*.msg` and loaded into runtime parsing immediately.
