@@ -10,8 +10,9 @@ COPY . .
 ENV WS_HOST=0.0.0.0 \
     WS_PORT=8080 \
     API_HOST=0.0.0.0 \
-    API_PORT=8090
+    API_PORT=8090 \
+    PYTHONUNBUFFERED=1
 
 EXPOSE 8080 8090
 
-CMD ["python", "main.py"]
+CMD ["python", "-u", "main.py"]

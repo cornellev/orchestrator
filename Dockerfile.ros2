@@ -1,4 +1,4 @@
-FROM osrf/ros:humble-ros-base
+FROM ros:humble-ros-base
 
 SHELL ["/bin/bash", "-lc"]
 
@@ -19,8 +19,9 @@ ENV ROS_ENABLED=true \
     WS_HOST=0.0.0.0 \
     WS_PORT=8080 \
     API_HOST=0.0.0.0 \
-    API_PORT=8090
+    API_PORT=8090 \
+    PYTHONUNBUFFERED=1
 
 EXPOSE 8080 8090
 
-CMD source /opt/ros/humble/setup.bash && python3 main.py
+CMD source /opt/ros/humble/setup.bash && exec python3 -u main.py
