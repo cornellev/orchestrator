@@ -101,7 +101,7 @@ The Rust workspace under `clientrs/` publishes two crates:
 | `orchestrator-protocol` | `orchestrator-protocol` | Codec, schemas, frames |
 | `orchestrator-ws-client` | `orchestrator-ws-client` | Tokio WebSocket client + Types REST sync |
 
-MSRV: Rust 1.75. Dual licensed MIT OR Apache-2.0.
+MSRV: Rust 1.85. Dual licensed MIT OR Apache-2.0.
 
 ```toml
 [dependencies]

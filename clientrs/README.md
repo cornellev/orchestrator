@@ -19,6 +19,10 @@ Licensed under either of
 
 at your option.
 
+## MSRV
+
+Rust 1.85 or newer (required by the current dependency tree, including crates that use edition 2024).
+
 ## Publishing
 
 1. Publish `orchestrator-protocol` first:

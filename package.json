@@ -1,0 +1,8 @@
+{
+  "name": "orchestrator",
+  "private": true,
+  "description": "Dev/test dependencies for the JavaScript client",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
