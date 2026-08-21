@@ -21,7 +21,7 @@ at your option.
 
 ## MSRV
 
-Rust 1.85 or newer (required by the current dependency tree, including crates that use edition 2024).
+Rust 1.88 or newer (required by the current dependency tree, including ICU crates used by the Types API HTTP client).
 
 ## Publishing
 

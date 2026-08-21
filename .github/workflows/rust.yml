@@ -32,7 +32,7 @@ jobs:
       - name: Install MSRV toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.85.0"
+          toolchain: "1.88.0"
 
       - name: Install stable for primary tests
         uses: dtolnay/rust-toolchain@stable
@@ -58,8 +58,8 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      - name: MSRV check (1.85)
-        run: cargo +1.85.0 check --workspace --all-features
+      - name: MSRV check (1.88)
+        run: cargo +1.88.0 check --workspace --all-features
 
       - name: Package dry-run (protocol)
         run: cargo publish -p orchestrator-protocol --dry-run
