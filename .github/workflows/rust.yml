@@ -1,0 +1,97 @@
+name: Rust
+
+on:
+  push:
+    paths:
+      - "clientrs/**"
+      - "test/protocol_vectors.json"
+      - "serialization.py"
+      - "ws.py"
+      - "main.py"
+      - "types_api.py"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    paths:
+      - "clientrs/**"
+      - "test/protocol_vectors.json"
+      - "serialization.py"
+      - "ws.py"
+      - "main.py"
+      - "types_api.py"
+      - ".github/workflows/rust.yml"
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clientrs
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.75.0
+          components: rustfmt, clippy
+
+      - name: Install stable for primary tests
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: clientrs
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (stable)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Test (stable)
+        run: cargo test --workspace --all-features
+
+      - name: Docs
+        run: cargo doc --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: MSRV check (1.75)
+        run: cargo +1.75.0 check --workspace --all-features
+
+      - name: Package dry-run (protocol)
+        run: cargo publish -p orchestrator-protocol --dry-run
+
+  cross-language:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+
+      - name: Python protocol tests
+        run: python -m unittest test.test_protocol -v
+
+      - name: JS protocol tests
+        run: node --test test/test_js_protocol.test.js
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust integration against Python server
+        working-directory: clientrs
+        run: cargo test -p orchestrator-ws-client --test integration -- --ignored

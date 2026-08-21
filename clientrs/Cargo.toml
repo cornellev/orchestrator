@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "orchestrator-protocol",
+    "orchestrator-ws-client",
+]
+default-members = [
+    "orchestrator-protocol",
+    "orchestrator-ws-client",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jgrimminck/orchestrator"
+homepage = "https://github.com/jgrimminck/orchestrator"
+authors = ["Orchestrator Contributors"]
+readme = "README.md"
+
+[workspace.dependencies]
+orchestrator-protocol = { version = "0.1.0", path = "orchestrator-protocol" }
+bytes = "1.7"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "sync", "time", "net", "io-util"] }
+tokio-tungstenite = { version = "0.26", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+url = "2.5"
+tracing = "0.1"

@@ -1,2 +1,4 @@
 __pycache__
 client/__pycache__
+clientrs/target/
+**/Cargo.lock

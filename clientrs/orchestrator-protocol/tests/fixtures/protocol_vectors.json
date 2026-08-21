@@ -1,0 +1,129 @@
+{
+  "string_hello": {
+    "type": "std_msgs/String",
+    "value": "hello",
+    "hex": "01090000000500000068656c6c6f"
+  },
+  "string_empty": {
+    "type": "std_msgs/String",
+    "value": "",
+    "hex": "010400000000000000"
+  },
+  "char_A": {
+    "type": "std_msgs/Char",
+    "value": "A",
+    "hex": "0a0100000041"
+  },
+  "int32_42": {
+    "type": "std_msgs/Int32",
+    "value": 42,
+    "hex": "02040000002a000000"
+  },
+  "float32_1_5": {
+    "type": "std_msgs/Float32",
+    "value": 1.5,
+    "hex": "03040000000000c03f"
+  },
+  "bool_true": {
+    "type": "std_msgs/Bool",
+    "value": true,
+    "hex": "040100000001"
+  },
+  "float64_pi": {
+    "type": "std_msgs/Float64",
+    "value": 3.141592653589793,
+    "hex": "0508000000182d4454fb210940"
+  },
+  "int64_neg": {
+    "type": "std_msgs/Int64",
+    "value": "-9223372036854775807",
+    "hex": "06080000000100000000000080"
+  },
+  "uint32_max": {
+    "type": "std_msgs/UInt32",
+    "value": "4294967295",
+    "hex": "0704000000ffffffff"
+  },
+  "uint64_big": {
+    "type": "std_msgs/UInt64",
+    "value": "18446744073709551615",
+    "hex": "0808000000ffffffffffffffff"
+  },
+  "byte_payload": {
+    "type": "std_msgs/Byte",
+    "value": {
+      "__bytes__": [
+        0,
+        1,
+        2,
+        3,
+        255
+      ]
+    },
+    "hex": "090500000000010203ff"
+  },
+  "color_rgba": {
+    "type": "std_msgs/ColorRGBA",
+    "value": [
+      0.1,
+      0.2,
+      0.3,
+      1.0
+    ],
+    "hex": "0b10000000cdcccc3dcdcc4c3e9a99993e0000803f"
+  },
+  "duration_1_5": {
+    "type": "std_msgs/Duration",
+    "value": 1.5,
+    "hex": "0c08000000010000000065cd1d"
+  },
+  "dynamic_point32": {
+    "type": "geometry_msgs/Point32",
+    "value": {
+      "x": 1.25,
+      "y": -2.5,
+      "z": 3.75
+    },
+    "hex": "ff23000000150067656f6d657472795f6d7367732f506f696e7433320000a03f000020c000007040",
+    "definition": "float32 x\nfloat32 y\nfloat32 z\n"
+  },
+  "dynamic_pointcloud": {
+    "type": "sensor_msgs/PointCloud",
+    "value": {
+      "points": [
+        {
+          "x": 1.25,
+          "y": -2.5,
+          "z": 3.75
+        },
+        {
+          "x": 10.0,
+          "y": 11.0,
+          "z": 12.0
+        }
+      ]
+    },
+    "hex": "ff34000000160073656e736f725f6d7367732f506f696e74436c6f7564020000000000a03f000020c000007040000020410000304100004041",
+    "definitions": {
+      "geometry_msgs/Point32": "float32 x\nfloat32 y\nfloat32 z\n",
+      "sensor_msgs/PointCloud": "geometry_msgs/Point32[] points\n"
+    }
+  },
+  "dynamic_pointcloud2lite": {
+    "type": "sensor_msgs/PointCloud2Lite",
+    "value": {
+      "width": 4,
+      "data": {
+        "__bytes__": [
+          1,
+          2,
+          3,
+          255
+        ]
+      },
+      "is_dense": true
+    },
+    "hex": "ff2a0000001b0073656e736f725f6d7367732f506f696e74436c6f7564324c6974650400000004000000010203ff01",
+    "definition": "uint32 width\nuint8[] data\nbool is_dense\n"
+  }
+}

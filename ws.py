@@ -1,8 +1,8 @@
 import asyncio
+import struct
 import threading
 from websockets.asyncio.server import serve
-from enum import Enum
-from typing import Optional, Callable, Any
+from typing import Optional
 import serialization as s
 import names
 
@@ -15,10 +15,42 @@ methods = {
 
 responses = {
     "echo": 0x80,
-    "echo_new": 0x81, # new topic added since last echo
-    "update": 0x82, # topic data update
-    "big_update": 0x83 # lots of topic updates (e.g. after request_all)
+    "echo_new": 0x81,  # new topic added since last echo
+    "update": 0x82,  # topic data update
+    "big_update": 0x83,  # lots of topic updates (e.g. after request_all)
+    "error": 0x84,  # protocol / application error
 }
+
+PROTOCOL_CLOSE_CODE = 1002
+
+
+class ProtocolError(ValueError):
+    """Raised for malformed or rejected client frames."""
+
+
+def encode_error(message: str, code: int = 1) -> bytes:
+    text = (message or "protocol error").encode("utf-8")
+    if len(text) > 1024:
+        text = text[:1024]
+    payload = bytearray()
+    payload.append(responses["error"])
+    payload.extend(int(code).to_bytes(2, byteorder="little", signed=False))
+    payload.extend(len(text).to_bytes(2, byteorder="little"))
+    payload.extend(text)
+    return bytes(payload)
+
+
+def decode_error(payload: bytes | memoryview) -> tuple[int, str]:
+    view = memoryview(payload)
+    if len(view) < 4:
+        raise ProtocolError("Truncated error response")
+    code = int.from_bytes(view[0:2], byteorder="little")
+    length = int.from_bytes(view[2:4], byteorder="little")
+    if 4 + length > len(view):
+        raise ProtocolError("Truncated error message")
+    message = bytes(view[4 : 4 + length]).decode("utf-8", errors="replace")
+    return code, message
+
 
 class WebSocketServer:
     def __init__(
@@ -35,10 +67,10 @@ class WebSocketServer:
         self.loop: Optional[asyncio.AbstractEventLoop] = loop
         self._on_client_publish = on_client_publish
 
-        self.clients = {} # maps connected clients with last interaction time
+        self.clients = {}  # maps connected clients with last interaction time
         self.sim: Optional[ROSSim] = None
 
-        self.nicknames = {} # maps client websockets to random nicknames for easier debugging
+        self.nicknames = {}  # maps client websockets to random nicknames for easier debugging
 
     def _ensure_sim(self) -> None:
         if self.sim is not None:
@@ -57,26 +89,39 @@ class WebSocketServer:
                 await client.send(data)
             except Exception as e:
                 print(f"Error sending to client: {e}")
-                self.clients.pop(client, None) # remove disconnected client
+                self.clients.pop(client, None)  # remove disconnected client
 
     async def handler(self, websocket):
         self._ensure_sim()
-        self.clients[websocket] = asyncio.get_event_loop().time() # store the time of connection
+        self.clients[websocket] = asyncio.get_event_loop().time()  # store the time of connection
         nickname = names.generate_name()
         self.nicknames[websocket] = nickname
         print(f"Client connected: {nickname} ({websocket.remote_address})")
         try:
             try:
                 async for message in websocket:
-                    # message is expected to be a bytes object containing the topic name and type
-                    # first byte is operation code (0 for subscribe, 1 for publish)
+                    if not message:
+                        await websocket.send(encode_error("Empty WebSocket frame", code=100))
+                        await websocket.close(code=PROTOCOL_CLOSE_CODE, reason="empty frame")
+                        break
+
+                    # first byte is operation code (echo=0x00, subscribe=0x01, publish=0x02, request_all=0x03)
                     op_code = message[0]
                     op = methods.get(op_code, None)
                     if op is None:
-                        print(f"Unknown operation code: {op_code}")
+                        await websocket.send(encode_error(f"Unknown operation code: {op_code}", code=101))
                         continue
 
-                    await self.sim.handleMethod(op, message[1:], websocket)
+                    try:
+                        await self.sim.handleMethod(op, message[1:], websocket)
+                    except ProtocolError as exc:
+                        await websocket.send(encode_error(str(exc), code=102))
+                        await websocket.close(code=PROTOCOL_CLOSE_CODE, reason=str(exc)[:120])
+                        break
+                    except (ValueError, struct.error) as exc:
+                        await websocket.send(encode_error(f"Malformed publish payload: {exc}", code=103))
+                        await websocket.close(code=PROTOCOL_CLOSE_CODE, reason="malformed payload")
+                        break
             except Exception as exc:
                 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
                 if not isinstance(exc, (ConnectionClosedOK, ConnectionClosedError)):
@@ -89,34 +134,49 @@ class WebSocketServer:
             # remove nickname mapping
             self.nicknames.pop(websocket, None)
 
-
     async def run(self) -> None:
         self._ensure_sim()
         async with serve(self.handler, self.host, self.port):
             # Run forever until cancelled (e.g. Ctrl+C in main)
             await asyncio.Future()
 
+
 def construct_topicData(topic_name: str, type_str: str, data):
-    # returns [type byte][count (4 bytes)][data...]
+    # returns [name_len][name...][type byte][count (4 bytes)][data...]
     if data is None:
         data = bytes([s.type_encoder(type_str)]) + (0).to_bytes(4, byteorder='little')
     else:
         data = s.encode(type_str, data)
-    pre_topic = topic_name.encode('utf-8')
+    pre_topic = s.encode_topic_name(topic_name)
     topic_len = len(pre_topic)
 
     return bytes([topic_len]) + pre_topic + data
 
+
 def decode_topicData(topic_data: bytes):
+    if not topic_data:
+        raise ProtocolError("Empty publish payload")
     topic_len = topic_data[0]
-    topic_name = topic_data[1:1+topic_len].decode('utf-8')
-    type_str, data = s.decode(topic_data[1+topic_len:])
+    if topic_len > s.MAX_TOPIC_NAME_LEN:
+        raise ProtocolError(f"Topic name length {topic_len} exceeds {s.MAX_TOPIC_NAME_LEN}")
+    if 1 + topic_len > len(topic_data):
+        raise ProtocolError("Truncated topic name")
+    try:
+        topic_name = topic_data[1:1 + topic_len].decode('utf-8')
+    except UnicodeDecodeError as exc:
+        raise ProtocolError(f"Invalid UTF-8 topic name: {exc}") from exc
+    try:
+        type_str, data = s.decode(topic_data[1 + topic_len:])
+    except Exception as exc:
+        raise ProtocolError(str(exc)) from exc
     return topic_name, type_str, data
+
 
 def encode_topic_value(type_str: str, data):
     if data is None:
         return bytes([s.type_encoder(type_str)]) + (0).to_bytes(4, byteorder='little')
     return s.encode(type_str, data)
+
 
 class ROSSim:
     def __init__(self, broadcaster, *, loop: asyncio.AbstractEventLoop, on_client_publish=None):
@@ -125,14 +185,14 @@ class ROSSim:
         self._loop_thread_id = threading.get_ident()
         self._on_client_publish = on_client_publish
 
-        self.topics = {} # topic_name -> type_str
-        self.topic_order = [] # preserve insertion order
+        self.topics = {}  # topic_name -> type_str
+        self.topic_order = []  # preserve insertion order
         self.data = {}
 
-        self.topicMap = {} # maps topic names to 4 bytes identifiers for efficient transmission over WebSocket
+        self.topicMap = {}  # maps topic names to 4 bytes identifiers for efficient transmission over WebSocket
         self.counter = 0
 
-        self.subscribers = set() # websockets that have subscribed to topics
+        self.subscribers = set()  # websockets that have subscribed to topics
 
     def add_topic(self, topic_name: str, type_str: str):
         # Thread-safe: ROS callbacks may call this off the asyncio loop thread.
@@ -167,7 +227,7 @@ class ROSSim:
             asyncio.create_task(self.notifyTopicUpdate(topic_name))
         else:
             raise ValueError(f"Topic '{topic_name}' not found in ROSSim.")
-        
+
     def get_topic_data(self, topic_name: str):
         if topic_name in self.topics:
             return self.data[topic_name]
@@ -178,12 +238,12 @@ class ROSSim:
         if topic_name in self.topics:
             return self.topics[topic_name]
         raise ValueError(f"Topic '{topic_name}' not found in ROSSim.")
-    
+
     def serializeTopic(self, topic_name: str):
         type_str = self.get_topic_type(topic_name)
         data = self.get_topic_data(topic_name)
         return construct_topicData(topic_name, type_str, data)
-        
+
     async def handleMethod(self, method, data, websocket):
         if method == "echo":
             await self.handleEchoTopics(websocket)
@@ -198,9 +258,11 @@ class ROSSim:
             else:
                 existing_type = self.topics.get(topic_name)
                 if existing_type != type_str:
-                    print(
-                        f"Type mismatch for topic '{topic_name}': existing={existing_type}, published={type_str}. "
-                        "Ignoring publish to avoid decoding corruption."
+                    await websocket.send(
+                        encode_error(
+                            f"Type mismatch for topic '{topic_name}': existing={existing_type}, published={type_str}",
+                            code=104,
+                        )
                     )
                     return
 
@@ -221,7 +283,7 @@ class ROSSim:
             for topic_name in self.topic_order:
                 payload.extend(self.serializeTopic(topic_name))
             await websocket.send(bytes(payload))
-            
+
     def smallTopicInfoMsg(self, topic_name: str):
         type_str = self.get_topic_type(topic_name)
         data = self.get_topic_data(topic_name)
@@ -234,15 +296,15 @@ class ROSSim:
             encoded = s.encode(type_str, data)
             count = int.from_bytes(encoded[1:5], byteorder='little')
 
-        topic = topic_name.encode('utf-8')
+        topic = s.encode_topic_name(topic_name)
         d = bytearray()
-        d.extend(self.topicMap[topic_name]) # topic identifier (4 bytes)
-        d.append(type_byte) # type byte
-        d.extend(len(dynamic_type_name).to_bytes(2, byteorder='little')) # optional dynamic type name length
-        d.extend(dynamic_type_name) # optional dynamic type name bytes
-        d.extend(count.to_bytes(4, byteorder='little')) # count
-        d.extend(len(topic).to_bytes(1, byteorder='little')) # topic name length
-        d.extend(topic) # topic name data
+        d.extend(self.topicMap[topic_name])  # topic identifier (4 bytes)
+        d.append(type_byte)  # type byte
+        d.extend(len(dynamic_type_name).to_bytes(2, byteorder='little'))  # optional dynamic type name length
+        d.extend(dynamic_type_name)  # optional dynamic type name bytes
+        d.extend(count.to_bytes(4, byteorder='little'))  # count
+        d.extend(len(topic).to_bytes(1, byteorder='little'))  # topic name length
+        d.extend(topic)  # topic name data
         return bytes(d)
 
     """
@@ -252,13 +314,13 @@ class ROSSim:
     async def handleEchoTopics(self, websocket):
         payload = bytearray()
         payload.append(responses["echo"])
-        payload.extend(len(self.topic_order).to_bytes(4, byteorder='little')) # number of topics
+        payload.extend(len(self.topic_order).to_bytes(4, byteorder='little'))  # number of topics
 
         for topic_name in self.topic_order:
             payload.extend(self.smallTopicInfoMsg(topic_name))
-    
+
         await websocket.send(bytes(payload))
-    
+
     async def notifyNewTopic(self, topic_name: str):
         # send new topic info to all subscribers
         payload = bytearray()

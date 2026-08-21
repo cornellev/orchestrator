@@ -21,6 +21,7 @@ ENV ROS_ENABLED=true \
     API_HOST=0.0.0.0 \
     API_PORT=8090 \
     PYTHONUNBUFFERED=1
+# Set API_WRITE_TOKEN when exposing the Types API beyond loopback.
 
 EXPOSE 8080 8090
 

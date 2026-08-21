@@ -24,7 +24,16 @@ RESP_CODES = {
 	0x81: "echo_new",
 	0x82: "update",
 	0x83: "big_update",
+	0x84: "error",
 }
+
+
+class ClientStoppedError(RuntimeError):
+	"""Raised when an operation is aborted because the client was stopped."""
+
+
+class ClientConnectionError(RuntimeError):
+	"""Raised when the client cannot establish or maintain a connection."""
 
 
 @dataclass
@@ -44,18 +53,28 @@ class TopicUpdate:
 	value: Any = None
 
 
+@dataclass
+class ProtocolErrorInfo:
+	code: int
+	message: str
+
+
 def _build_topic_data(topic: str, type_str: str, data) -> bytes:
 	payload = s.encode(type_str, data)
-	encoded_name = topic.encode("utf-8")
+	encoded_name = s.encode_topic_name(topic)
 	return bytes([len(encoded_name)]) + encoded_name + payload
 
 
 def _parse_topic_info(buf: memoryview, offset: int) -> Tuple[TopicInfo, int]:
+	if offset + 7 > len(buf):
+		raise ValueError("Truncated topic info header")
 	topic_id = int.from_bytes(buf[offset : offset + 4], byteorder="big")
 	type_byte = buf[offset + 4]
 	dynamic_len = int.from_bytes(buf[offset + 5 : offset + 7], byteorder="little")
 	dynamic_start = offset + 7
 	dynamic_end = dynamic_start + dynamic_len
+	if dynamic_end + 5 > len(buf):
+		raise ValueError("Truncated topic info payload")
 
 	if type_byte == s.DYNAMIC_TYPE_BYTE:
 		type_str = bytes(buf[dynamic_start:dynamic_end]).decode("utf-8")
@@ -66,19 +85,28 @@ def _parse_topic_info(buf: memoryview, offset: int) -> Tuple[TopicInfo, int]:
 	name_len = buf[dynamic_end + 4]
 	start = dynamic_end + 5
 	end = start + name_len
+	if end > len(buf):
+		raise ValueError("Truncated topic name")
 	name = bytes(buf[start:end]).decode("utf-8")
 	return TopicInfo(topic_id=topic_id, type_str=type_str, count=count, name=name), end
 
 
 def _parse_big_update(buf: memoryview) -> Dict[str, Tuple[str, object]]:
+	if len(buf) < 4:
+		raise ValueError("Truncated big_update")
 	total_topics = int.from_bytes(buf[0:4], byteorder="little")
 	offset = 4
 	results: Dict[str, Tuple[str, object]] = {}
 	for _ in range(total_topics):
+		if offset >= len(buf):
+			raise ValueError("Truncated big_update topic entry")
 		name_len = buf[offset]
+		if offset + 1 + name_len > len(buf):
+			raise ValueError("Truncated big_update topic name")
 		name = bytes(buf[offset + 1 : offset + 1 + name_len]).decode("utf-8")
 		data_offset = offset + 1 + name_len
-		type_byte = buf[data_offset]
+		if data_offset + 5 > len(buf):
+			raise ValueError("Truncated big_update typed payload")
 		count = int.from_bytes(buf[data_offset + 1 : data_offset + 5], byteorder="little")
 		raw_value = bytes(buf[data_offset : data_offset + 5 + count])
 		type_str, value = s.decode(raw_value)
@@ -95,6 +123,17 @@ def _parse_update(buf: memoryview) -> TopicUpdate:
 		if type_str != info.type_str:
 			raise ValueError(f"Mismatched update type for topic '{info.name}': {type_str} != {info.type_str}")
 	return TopicUpdate(topic_id=info.topic_id, type_str=info.type_str, count=info.count, name=info.name, value=value)
+
+
+def _parse_error(buf: memoryview) -> ProtocolErrorInfo:
+	if len(buf) < 4:
+		raise ValueError("Truncated error response")
+	code = int.from_bytes(buf[0:2], byteorder="little")
+	length = int.from_bytes(buf[2:4], byteorder="little")
+	if 4 + length > len(buf):
+		raise ValueError("Truncated error message")
+	message = bytes(buf[4 : 4 + length]).decode("utf-8", errors="replace")
+	return ProtocolErrorInfo(code=code, message=message)
 
 
 class OrchestratorClient:
@@ -114,6 +153,7 @@ class OrchestratorClient:
 		on_new_topic: Optional[Callable[[TopicInfo], Awaitable[None] | None]] = None,
 		on_update: Optional[Callable[[TopicUpdate], Awaitable[None] | None]] = None,
 		on_big_update: Optional[Callable[[Dict[str, Tuple[str, object]]], Awaitable[None] | None]] = None,
+		on_error: Optional[Callable[[ProtocolErrorInfo], Awaitable[None] | None]] = None,
 	) -> None:
 		self.uri = uri
 		self.reconnect = reconnect
@@ -124,11 +164,15 @@ class OrchestratorClient:
 		self._task: Optional[asyncio.Task] = None
 		self._connected = asyncio.Event()
 		self._stop = asyncio.Event()
+		self._runner_done = asyncio.Event()
+		self._runner_done.set()
+		self._last_error: Optional[BaseException] = None
 
 		self._on_echo = on_echo
 		self._on_new_topic = on_new_topic
 		self._on_update = on_update
 		self._on_big_update = on_big_update
+		self._on_error = on_error
 
 		self._want_subscribe = False
 
@@ -149,17 +193,30 @@ class OrchestratorClient:
 
 	async def start(self, auto_subscribe: bool = True) -> None:
 		self._stop.clear()
+		self._last_error = None
 		self._want_subscribe = auto_subscribe
 		if self._task is None or self._task.done():
+			self._runner_done.clear()
 			self._task = asyncio.create_task(self._runner())
-		await self._connected.wait()
+		await self._wait_connected()
 
 	async def stop(self) -> None:
 		self._stop.set()
-		if self._ws:
-			await self._ws.close()
-		if self._task:
-			await self._task
+		self._connected.clear()
+		ws = self._ws
+		self._ws = None
+		if ws is not None:
+			try:
+				await ws.close()
+			except Exception:
+				pass
+		if self._task is not None:
+			try:
+				await self._task
+			except Exception:
+				pass
+			self._task = None
+		self._runner_done.set()
 
 	async def echo(self) -> None:
 		await self._send(bytes([OP_CODES["echo"]]))
@@ -175,25 +232,56 @@ class OrchestratorClient:
 		payload = _build_topic_data(topic, type_str, data)
 		await self._send(bytes([OP_CODES["publish"]]) + payload)
 
+	async def _wait_connected(self) -> None:
+		while True:
+			if self._connected.is_set() and self._ws is not None:
+				return
+			if self._stop.is_set():
+				raise ClientStoppedError("Client stopped before connecting")
+			if self._runner_done.is_set():
+				if self._last_error is not None:
+					raise ClientConnectionError(f"Failed to connect: {self._last_error}") from self._last_error
+				raise ClientConnectionError("Failed to connect")
+			waiters = [
+				asyncio.create_task(self._connected.wait()),
+				asyncio.create_task(self._stop.wait()),
+				asyncio.create_task(self._runner_done.wait()),
+			]
+			done, pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+			for task in pending:
+				task.cancel()
+			for task in done:
+				task.result()
+
 	async def _runner(self) -> None:
 		delay = self.backoff
-		while not self._stop.is_set():
-			try:
-				async with connect(self.uri) as ws:
-					self._ws = ws
-					self._connected.set()
-					delay = self.backoff
-					if self._want_subscribe:
-						await self.subscribe()
-					await self._receive_loop(ws)
-			except Exception as exc:  # pragma: no cover - network failures
-				self._connected.clear()
-				self._ws = None
-				if not self.reconnect or self._stop.is_set():
-					break
-				await asyncio.sleep(delay)
-				delay = min(self.backoff_max, delay * 2)
-		self._connected.clear()
+		try:
+			while not self._stop.is_set():
+				try:
+					async with connect(self.uri) as ws:
+						self._ws = ws
+						self._last_error = None
+						self._connected.set()
+						delay = self.backoff
+						if self._want_subscribe:
+							await self.subscribe()
+						await self._receive_loop(ws)
+				except Exception as exc:  # pragma: no cover - network failures
+					self._last_error = exc
+					self._connected.clear()
+					self._ws = None
+					if not self.reconnect or self._stop.is_set():
+						break
+					try:
+						await asyncio.wait_for(self._stop.wait(), timeout=delay)
+						break
+					except asyncio.TimeoutError:
+						pass
+					delay = min(self.backoff_max, delay * 2)
+		finally:
+			self._connected.clear()
+			self._ws = None
+			self._runner_done.set()
 
 	async def _receive_loop(self, ws) -> None:
 		async for raw in ws:
@@ -218,13 +306,21 @@ class OrchestratorClient:
 				update = _parse_big_update(payload)
 				if self._on_big_update:
 					await maybe_await(self._on_big_update(update))
+			elif kind == "error":
+				info = _parse_error(payload)
+				if self._on_error:
+					await maybe_await(self._on_error(info))
+			else:
+				raise ValueError(f"Unknown response opcode: {code}")
 		self._connected.clear()
 		self._ws = None
 
 	async def _send(self, data: bytes) -> None:
-		await self._connected.wait()
+		await self._wait_connected()
+		if self._stop.is_set():
+			raise ClientStoppedError("Client stopped")
 		if not self._ws:
-			raise RuntimeError("WebSocket not connected")
+			raise ClientConnectionError("WebSocket not connected")
 		await self._ws.send(data)
 
 	async def _handle_echo(self, payload: memoryview) -> Tuple[TopicInfo, ...]:
@@ -242,12 +338,14 @@ async def maybe_await(result) -> None:
 		await result
 
 
-def _http_json(method: str, url: str, body: Optional[dict] = None) -> dict:
+def _http_json(method: str, url: str, body: Optional[dict] = None, token: Optional[str] = None) -> dict:
 	data = None
 	headers = {}
 	if body is not None:
 		data = json.dumps(body).encode("utf-8")
 		headers["Content-Type"] = "application/json"
+	if token:
+		headers["Authorization"] = f"Bearer {token}"
 
 	req = Request(url, data=data, headers=headers, method=method)
 	with urlopen(req, timeout=10) as response:
@@ -272,12 +370,16 @@ def _collect_msg_definitions(folder: Path) -> Dict[str, str]:
 	return result
 
 
-async def sync_types_from_server(api_base: str = "http://localhost:8090", since: Optional[str] = None) -> Dict[str, str]:
+async def sync_types_from_server(
+	api_base: str = "http://localhost:8090",
+	since: Optional[str] = None,
+	token: Optional[str] = None,
+) -> Dict[str, str]:
 	def _work() -> Dict[str, str]:
 		query = ""
 		if since:
 			query = "?" + urlencode({"since": since})
-		payload = _http_json("GET", f"{api_base.rstrip('/')}/api/types{query}")
+		payload = _http_json("GET", f"{api_base.rstrip('/')}/api/types{query}", token=token)
 		loaded: Dict[str, str] = {}
 		for item in payload.get("types", []):
 			type_name = item.get("type")
@@ -291,7 +393,11 @@ async def sync_types_from_server(api_base: str = "http://localhost:8090", since:
 	return await asyncio.to_thread(_work)
 
 
-async def sync_types_to_server(type_definitions: Dict[str, str], api_base: str = "http://localhost:8090") -> dict:
+async def sync_types_to_server(
+	type_definitions: Dict[str, str],
+	api_base: str = "http://localhost:8090",
+	token: Optional[str] = None,
+) -> dict:
 	def _work() -> dict:
 		payload = {
 			"types": [
@@ -299,11 +405,15 @@ async def sync_types_to_server(type_definitions: Dict[str, str], api_base: str =
 				for type_name, definition in type_definitions.items()
 			]
 		}
-		return _http_json("POST", f"{api_base.rstrip('/')}/api/types/sync", payload)
+		return _http_json("POST", f"{api_base.rstrip('/')}/api/types/sync", payload, token=token)
 
 	return await asyncio.to_thread(_work)
 
 
-async def sync_types_folder_to_server(folder: str | Path, api_base: str = "http://localhost:8090") -> dict:
+async def sync_types_folder_to_server(
+	folder: str | Path,
+	api_base: str = "http://localhost:8090",
+	token: Optional[str] = None,
+) -> dict:
 	definitions = await asyncio.to_thread(_collect_msg_definitions, Path(folder))
-	return await sync_types_to_server(definitions, api_base=api_base)
+	return await sync_types_to_server(definitions, api_base=api_base, token=token)

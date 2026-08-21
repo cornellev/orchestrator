@@ -1,0 +1,50 @@
+[package]
+name = "orchestrator-ws-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+readme = "README.md"
+description = "Async Tokio WebSocket client and Types REST API for the Orchestrator server"
+keywords = ["orchestrator", "websocket", "tokio", "ros", "client"]
+categories = ["network-programming", "asynchronous", "api-bindings"]
+include = [
+    "src/**/*",
+    "examples/**/*",
+    "tests/**/*",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+orchestrator-protocol = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+url = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "process", "io-util"] }
+serde_json = { workspace = true }
+orchestrator-protocol = { workspace = true }
+
+[features]
+default = ["types-api", "rustls-tls"]
+types-api = ["dep:reqwest", "dep:serde", "dep:serde_json", "orchestrator-protocol/serde"]
+rustls-tls = ["tokio-tungstenite/rustls-tls-webpki-roots", "reqwest?/rustls-tls"]
+native-tls = ["tokio-tungstenite/native-tls", "reqwest?/native-tls"]

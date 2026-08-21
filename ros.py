@@ -20,6 +20,16 @@ _DEFAULT_EXCLUDE_TOPICS = {
 }
 
 
+def _select_unique_ros_type(ros_types: list[str] | tuple[str, ...]) -> Optional[str]:
+	"""Return the sole advertised ROS type, or None when the topic is ambiguous/empty."""
+	if not ros_types:
+		return None
+	unique = list(dict.fromkeys(ros_types))
+	if len(unique) != 1:
+		return None
+	return unique[0]
+
+
 def _ros_msg_to_orch_type(ros_type: str) -> str:
 	# ROS2 topic types come like: "std_msgs/msg/String".
 	# Orchestrator dynamic types expect: "std_msgs/String".
@@ -445,7 +455,18 @@ class ROS2Bridge:
 		if not self._ready.wait(timeout=10.0):
 			raise RuntimeError("ROS2 bridge failed to start (timeout waiting for node)")
 
-	def stop(self) -> None:
+	def stop(self, *, drain_timeout_sec: float = 0.5) -> None:
+		deadline = time.monotonic() + max(0.0, drain_timeout_sec)
+		while time.monotonic() < deadline and not self._publish_queue.empty():
+			if self._node is not None:
+				try:
+					self._drain_publish_queue(max_items=50)
+				except Exception:
+					break
+			else:
+				break
+			time.sleep(0.01)
+
 		self._stop.set()
 		if self._thread and self._thread.is_alive():
 			self._thread.join(timeout=5.0)
@@ -515,10 +536,17 @@ class ROS2Bridge:
 				continue
 			if not ros_types:
 				continue
-			ros_type = ros_types[0]
+			ros_type = _select_unique_ros_type(ros_types)
+			if ros_type is None:
+				try:
+					self._node.get_logger().warning(
+						f"Skipping ambiguous topic {topic_name} with multiple types: {ros_types}"
+					)
+				except Exception:
+					pass
+				continue
 			if topic_name in self._subscriptions:
 				continue
-
 			try:
 				orch_type = _ensure_orch_schema_for_ros_msg(ros_type)
 			except Exception as exc:
@@ -551,7 +579,14 @@ class ROS2Bridge:
 		# Runs on ROS thread.
 		try:
 			value = _ros_msg_to_value(ros_msg)
-		except Exception:
+		except Exception as exc:
+			try:
+				if self._node is not None:
+					self._node.get_logger().warning(
+						f"ROS->WS conversion failed for {topic} ({orch_type}): {exc}"
+					)
+			except Exception:
+				pass
 			return
 
 		# Loopback prevention: drop if it matches a recent WS->ROS publish.
@@ -571,10 +606,10 @@ class ROS2Bridge:
 		self.sim.add_topic(topic, orch_type)
 		self.sim.update_topic(topic, value)
 
-	def _drain_publish_queue(self) -> None:
+	def _drain_publish_queue(self, *, max_items: int = 200) -> int:
 		# Runs on ROS thread.
 		if self._node is None:
-			return
+			return 0
 
 		try:
 			utilities = importlib.import_module("rosidl_runtime_py.utilities")
@@ -582,11 +617,11 @@ class ROS2Bridge:
 			qos_mod = importlib.import_module("rclpy.qos")
 			QoSProfile = getattr(qos_mod, "QoSProfile")
 		except Exception:
-			return
+			return 0
 
 		qos = QoSProfile(depth=10)
 		drained = 0
-		while drained < 200:
+		while drained < max_items:
 			try:
 				topic, orch_type, value = self._publish_queue.get_nowait()
 			except queue.Empty:
@@ -630,4 +665,5 @@ class ROS2Bridge:
 					self._node.get_logger().debug(f"WS->ROS publish failed for {topic} ({orch_type}): {exc}")
 				except Exception:
 					pass
+		return drained
 

@@ -1,4 +1,6 @@
 import json
+import ipaddress
+import socket
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -10,12 +12,46 @@ from urllib.parse import parse_qs, urlparse
 
 import serialization as s
 
+MAX_BODY_BYTES = 1_000_000
+
 
 @dataclass
 class StoredType:
     type_name: str
     definition: str
     updated_at: str
+
+
+def _parse_iso_timestamp(value: str) -> datetime:
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = (host or "").strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(normalized, None)
+        except socket.gaierror:
+            return False
+        if not infos:
+            return False
+        for info in infos:
+            try:
+                if not ipaddress.ip_address(info[4][0]).is_loopback:
+                    return False
+            except ValueError:
+                return False
+        return True
 
 
 class CustomTypeStore:
@@ -28,6 +64,8 @@ class CustomTypeStore:
         if "/" not in type_name:
             raise ValueError("Type must be in the form 'package/MessageName'")
         package, msg_name = type_name.split("/", 1)
+        if not package or not msg_name or "/" in msg_name:
+            raise ValueError("Type must be in the form 'package/MessageName'")
         return self.root / package / "msg" / f"{msg_name}.msg"
 
     def list_types(self) -> list[StoredType]:
@@ -68,7 +106,8 @@ class CustomTypeStore:
         with self._lock:
             path.write_text(definition.strip() + "\n", encoding="utf-8")
             package = type_name.split("/", 1)[0]
-            s.load_message_file(path, package=package)
+            with s._registry_lock:
+                s.load_message_file(path, package=package)
             stat = path.stat()
             return StoredType(
                 type_name=type_name,
@@ -79,6 +118,8 @@ class CustomTypeStore:
 
 class TypesAPIHandler(BaseHTTPRequestHandler):
     store: CustomTypeStore = None
+    write_token: Optional[str] = None
+    max_body_bytes: int = MAX_BODY_BYTES
 
     def do_OPTIONS(self):
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -114,6 +155,9 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
         self._json_response(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
     def do_PUT(self):
+        if not self._authorize_write():
+            return
+
         parsed = urlparse(self.path)
         if not parsed.path.startswith("/api/types/"):
             self._json_response(HTTPStatus.NOT_FOUND, {"error": "Not found"})
@@ -149,6 +193,9 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self):
+        if not self._authorize_write():
+            return
+
         parsed = urlparse(self.path)
         if parsed.path != "/api/types/sync":
             self._json_response(HTTPStatus.NOT_FOUND, {"error": "Not found"})
@@ -164,16 +211,20 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
             return
 
         saved = []
-        for item in incoming:
+        errors = []
+        for index, item in enumerate(incoming):
             if not isinstance(item, dict):
+                errors.append({"index": index, "error": "Entry must be an object"})
                 continue
             type_name = item.get("type")
             definition = item.get("definition")
             if not isinstance(type_name, str) or not isinstance(definition, str):
+                errors.append({"index": index, "error": "Fields 'type' and 'definition' must be strings"})
                 continue
             try:
                 stored = self.store.save_type(type_name, definition)
-            except Exception:
+            except Exception as exc:
+                errors.append({"index": index, "type": type_name, "error": str(exc)})
                 continue
             saved.append(
                 {
@@ -182,7 +233,26 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
                 }
             )
 
-        self._json_response(HTTPStatus.OK, {"saved": saved, "count": len(saved)})
+        status = HTTPStatus.OK if not errors else HTTPStatus.BAD_REQUEST
+        self._json_response(
+            status,
+            {
+                "saved": saved,
+                "count": len(saved),
+                "errors": errors,
+            },
+        )
+
+    def _authorize_write(self) -> bool:
+        expected = getattr(self, "write_token", None)
+        if not expected:
+            return True
+        header = self.headers.get("Authorization", "")
+        prefix = "Bearer "
+        if not header.startswith(prefix) or header[len(prefix):] != expected:
+            self._json_response(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
+            return False
+        return True
 
     def _handle_list_types(self, parsed):
         query = parse_qs(parsed.query)
@@ -190,7 +260,19 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
 
         all_types = self.store.list_types()
         if since:
-            filtered = [t for t in all_types if t.updated_at > since]
+            try:
+                since_dt = _parse_iso_timestamp(since)
+            except Exception:
+                self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Invalid 'since' timestamp"})
+                return
+            filtered = []
+            for item in all_types:
+                try:
+                    updated = _parse_iso_timestamp(item.updated_at)
+                except Exception:
+                    continue
+                if updated > since_dt:
+                    filtered.append(item)
         else:
             filtered = all_types
 
@@ -221,6 +303,18 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
             self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Invalid Content-Length"})
             return None
 
+        if length < 0:
+            self._json_response(HTTPStatus.BAD_REQUEST, {"error": "Invalid Content-Length"})
+            return None
+
+        max_bytes = getattr(self, "max_body_bytes", MAX_BODY_BYTES)
+        if length > max_bytes:
+            self._json_response(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                {"error": f"Body exceeds {max_bytes} bytes"},
+            )
+            return None
+
         raw = self.rfile.read(length) if length > 0 else b"{}"
         try:
             return json.loads(raw.decode("utf-8"))
@@ -240,25 +334,45 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
     def _set_cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
     def log_message(self, format, *args):
         return
 
 
 class TypesAPIServer:
-    def __init__(self, host: str = "localhost", port: int = 8090, store_dir: str = "custom_types"):
+    def __init__(
+        self,
+        host: str = "localhost",
+        port: int = 8090,
+        store_dir: str = "custom_types",
+        write_token: Optional[str] = None,
+        max_body_bytes: int = MAX_BODY_BYTES,
+        require_token_for_remote: bool = True,
+    ):
         self.host = host
         self.port = port
+        self.write_token = write_token
+        self.max_body_bytes = max_body_bytes
+        self.require_token_for_remote = require_token_for_remote
         self.store = CustomTypeStore(Path(store_dir).resolve())
         self._httpd: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
     def start(self):
-        s.load_message_root(self.store.root)
+        if self.require_token_for_remote and not _is_loopback_host(self.host) and not self.write_token:
+            raise RuntimeError(
+                "API_WRITE_TOKEN is required when binding Types API to a non-loopback address "
+                f"(API_HOST={self.host!r})"
+            )
+
+        with s._registry_lock:
+            s.load_message_root(self.store.root)
 
         handler = type("BoundTypesAPIHandler", (TypesAPIHandler,), {})
         handler.store = self.store
+        handler.write_token = self.write_token
+        handler.max_body_bytes = self.max_body_bytes
         self._httpd = ThreadingHTTPServer((self.host, self.port), handler)
 
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)

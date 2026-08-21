@@ -1,9 +1,14 @@
 import os
 import re
 import struct
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
+
+MAX_TOPIC_NAME_LEN = 255
+
+_registry_lock = threading.RLock()
 
 types = {
     "std_msgs/String": str,
@@ -123,7 +128,8 @@ def _parse_field_type(type_token: str):
 
 def register_message_type(type_name: str, fields: list[FieldDef]):
     normalized = _normalize_type_name(type_name)
-    message_registry[normalized] = MessageDef(type_name=normalized, fields=tuple(fields))
+    with _registry_lock:
+        message_registry[normalized] = MessageDef(type_name=normalized, fields=tuple(fields))
 
 
 def load_message_definition(type_name: str, definition: str):
@@ -149,7 +155,8 @@ def load_message_definition(type_name: str, definition: str):
         resolved_base = _normalize_type_name(base, package_name)
         fields.append(FieldDef(name=name, type_name=resolved_base, is_array=is_array, array_len=fixed_len))
 
-    register_message_type(type_name, fields)
+    with _registry_lock:
+        register_message_type(type_name, fields)
     return _normalize_type_name(type_name)
 
 
@@ -257,29 +264,53 @@ def _encode_builtin_scalar(type_name: str, value):
         if isinstance(value, str):
             if len(value) != 1:
                 raise ValueError("char value must be a single character")
-            value = ord(value)
+            codepoint = ord(value)
+            if codepoint > 127:
+                raise ValueError("char value must be a single ASCII character (0-127)")
+            value = codepoint
+        else:
+            value = int(value)
+            if value < -128 or value > 127:
+                raise ValueError("char value must fit in signed int8")
 
     fmt, _ = BUILTIN_SCALARS[scalar]
     return struct.pack(fmt, value)
 
 
+def _require_bytes(data: bytes, offset: int, size: int, label: str):
+    if offset < 0 or size < 0 or offset + size > len(data):
+        raise ValueError(f"Truncated {label}: need {size} bytes at offset {offset}, have {len(data) - offset}")
+
+
 def _decode_builtin_scalar(type_name: str, data: bytes, offset: int):
     scalar = type_name.lower()
     if scalar == "string":
+        _require_bytes(data, offset, 4, "string length")
         length = int.from_bytes(data[offset : offset + 4], "little")
         start = offset + 4
+        _require_bytes(data, start, length, "string payload")
         end = start + length
         return data[start:end].decode("utf-8"), end
 
     if scalar == "duration":
+        _require_bytes(data, offset, 8, "duration")
         sec, nsec = struct.unpack("<ii", data[offset : offset + 8])
         return sec + nsec / 1e9, offset + 8
 
     if scalar == "time":
+        _require_bytes(data, offset, 8, "time")
         sec, nsec = struct.unpack("<II", data[offset : offset + 8])
         return {"sec": sec, "nsec": nsec}, offset + 8
 
+    if scalar == "char":
+        _require_bytes(data, offset, 1, "char")
+        value = struct.unpack("<b", data[offset : offset + 1])[0]
+        if value < 0 or value > 127:
+            raise ValueError("char payload must be an ASCII codepoint (0-127)")
+        return chr(value), offset + 1
+
     fmt, size = BUILTIN_SCALARS[scalar]
+    _require_bytes(data, offset, size, scalar)
     value = struct.unpack(fmt, data[offset : offset + size])[0]
     return value, offset + size
 
@@ -314,10 +345,12 @@ def _decode_field(field: FieldDef, data: bytes, offset: int):
     if field.is_array:
         count = field.array_len
         if count is None:
+            _require_bytes(data, offset, 4, f"array length for '{field.name}'")
             count = int.from_bytes(data[offset : offset + 4], "little")
             offset += 4
 
         if field.type_name.lower() in {"uint8", "byte"}:
+            _require_bytes(data, offset, count, f"byte array '{field.name}'")
             end = offset + count
             return bytes(data[offset:end]), end
 
@@ -331,9 +364,10 @@ def _decode_field(field: FieldDef, data: bytes, offset: int):
 
 
 def _encode_message(type_name: str, value):
-    if type_name not in message_registry:
-        raise ValueError(f"Type '{type_name}' not supported. Load a .msg schema first.")
-    msg = message_registry[type_name]
+    with _registry_lock:
+        if type_name not in message_registry:
+            raise ValueError(f"Type '{type_name}' not supported. Load a .msg schema first.")
+        msg = message_registry[type_name]
     if not isinstance(value, dict):
         raise ValueError(f"Message '{type_name}' expects dict payload")
 
@@ -344,10 +378,11 @@ def _encode_message(type_name: str, value):
 
 
 def _decode_message(type_name: str, data: bytes, offset: int):
-    if type_name not in message_registry:
-        raise ValueError(f"Type '{type_name}' not supported. Load a .msg schema first.")
+    with _registry_lock:
+        if type_name not in message_registry:
+            raise ValueError(f"Type '{type_name}' not supported. Load a .msg schema first.")
+        msg = message_registry[type_name]
 
-    msg = message_registry[type_name]
     result = {}
     for field in msg.fields:
         val, offset = _decode_field(field, data, offset)
@@ -404,17 +439,28 @@ def encode(type_str, data):
 
 
 def decode_typed(type_str: str, payload: bytes):
-    return _decode_value_raw(type_str, payload, 0)[0]
+    value, consumed = _decode_value_raw(type_str, payload, 0)
+    if consumed != len(payload):
+        raise ValueError(f"Trailing bytes after decoding '{type_str}': {len(payload) - consumed}")
+    return value
 
 
 def decode(data: bytes):
+    if not data:
+        raise ValueError("Empty typed payload")
+    _require_bytes(data, 0, 5, "typed envelope")
     type_byte = data[0]
     count = int.from_bytes(data[1:5], byteorder="little")
+    _require_bytes(data, 5, count, "typed payload")
     payload = data[5 : 5 + count]
+    if 5 + count != len(data):
+        raise ValueError(f"Trailing bytes after typed payload: {len(data) - (5 + count)}")
 
     if type_byte == DYNAMIC_TYPE_BYTE:
+        _require_bytes(payload, 0, 2, "dynamic type name length")
         type_name_len = int.from_bytes(payload[0:2], "little")
         type_name_start = 2
+        _require_bytes(payload, type_name_start, type_name_len, "dynamic type name")
         type_name_end = type_name_start + type_name_len
         type_name = payload[type_name_start:type_name_end].decode("utf-8")
         value = decode_typed(type_name, payload[type_name_end:])
@@ -425,6 +471,13 @@ def decode(data: bytes):
         return type_name, bytes(payload)
     value = decode_typed(type_name, payload)
     return type_name, value
+
+
+def encode_topic_name(topic_name: str) -> bytes:
+    encoded = topic_name.encode("utf-8")
+    if len(encoded) > MAX_TOPIC_NAME_LEN:
+        raise ValueError(f"Topic name exceeds {MAX_TOPIC_NAME_LEN} UTF-8 bytes")
+    return encoded
 
 
 _auto_discover_message_defs()

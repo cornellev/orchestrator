@@ -1,11 +1,12 @@
 Orchestrator WebSocket Server
 =============================
 
-This project provides a small WebSocket server and matching clients (JavaScript and Python) for publishing and subscribing to typed topics, inspired by simple ROS-style messaging. The binary protocol is shared between:
+This project provides a small WebSocket server and matching clients (JavaScript, Python, and Rust) for publishing and subscribing to typed topics, inspired by simple ROS-style messaging. The binary protocol is shared between:
 
 - The server started by running `main.py`.
 - The browser/Node client in `clientjs/Client.js`.
 - The Python client in `client/client.py`.
+- The Rust crates in `clientrs/` (`orchestrator-protocol` + `orchestrator-ws-client`).
 
 Running the server
 ------------------
@@ -50,12 +51,105 @@ Common env vars:
 - `WS_HOST` / `WS_PORT` (default `localhost:8080`)
 - `API_HOST` / `API_PORT` (default `localhost:8090`)
 - `CUSTOM_TYPES_DIR` (default `custom_types`)
+- `API_WRITE_TOKEN` (optional on loopback; **required** when `API_HOST` is non-loopback such as `0.0.0.0`)
 
 ROS2 bridge env vars (only used if `ROS_ENABLED=true`):
 
 - `ROS_ENABLED` (default `false`)
 - `ROS_NODE_NAME` (default `orchestrator_bridge`)
 - `ROS_DISCOVERY_PERIOD_SEC` (default `1.0`)
+
+Binary protocol notes
+---------------------
+
+Canonical typed payload layout (Python and JavaScript must match):
+
+- Envelope: `[type_byte][count:u32le][payload...]`
+- `std_msgs/String` payload: `[strlen:u32le][utf8 bytes...]` (ROS-style length-prefixed)
+- `std_msgs/Char` payload: one signed `int8` ASCII codepoint; values round-trip as a one-character string
+- Topic names are length-prefixed with one byte and limited to **255 UTF-8 bytes**
+- Server responses: `echo=0x80`, `echo_new=0x81`, `update=0x82`, `big_update=0x83`, `error=0x84`
+
+Malformed frames and type mismatches return an `error` response instead of silently failing.
+
+Testing
+-------
+
+```bash
+python -m unittest discover -v
+node --test test/test_js_protocol.test.js
+cd clientrs && cargo test --workspace --all-features
+```
+
+Shared golden vectors live in `clientrs/orchestrator-protocol/tests/fixtures/protocol_vectors.json`
+(mirrored at `test/protocol_vectors.json`) and are checked by Python, Node, and Rust.
+
+Live Rust ↔ Python integration tests (ignored by default):
+
+```bash
+cd clientrs
+cargo test -p orchestrator-ws-client --test integration -- --ignored
+```
+
+Rust client
+-----------
+
+The Rust workspace under `clientrs/` publishes two crates:
+
+| Crate | crates.io name | Role |
+|-------|----------------|------|
+| `orchestrator-protocol` | `orchestrator-protocol` | Codec, schemas, frames |
+| `orchestrator-ws-client` | `orchestrator-ws-client` | Tokio WebSocket client + Types REST sync |
+
+MSRV: Rust 1.75. Dual licensed MIT OR Apache-2.0.
+
+```toml
+[dependencies]
+orchestrator-ws-client = "0.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+Example:
+
+```rust
+use orchestrator_protocol::Value;
+use orchestrator_ws_client::{Client, ClientEvent};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (client, mut events) = Client::builder()
+        .uri("ws://127.0.0.1:8080")
+        .connect()
+        .await?;
+
+    client.publish("/example", "std_msgs/String", Value::string("hello from Rust")).await?;
+
+    while let Some(event) = events.recv().await {
+        if let ClientEvent::Update(update) = event {
+            println!("update on {}: {:?}", update.name, update.value);
+            break;
+        }
+    }
+    client.stop().await?;
+    Ok(())
+}
+```
+
+Dynamic schemas can be loaded locally or synced from the Types API:
+
+```rust
+use orchestrator_protocol::{load_message_definition, MessageRegistry};
+use orchestrator_ws_client::sync_types_from_server;
+use std::sync::Arc;
+
+let registry = Arc::new(MessageRegistry::new());
+load_message_definition(&registry, "geometry_msgs/Point32", "float32 x\nfloat32 y\nfloat32 z\n")?;
+// or: sync_types_from_server(&registry, "http://127.0.0.1:8090", None, None).await?;
+```
+
+Also see `clientrs/orchestrator-ws-client/examples/demo_publish.rs`.
+
+**Publishing note:** On the first crates.io release, publish `orchestrator-protocol` first, then `orchestrator-ws-client` (path+version dependency). Do not publish from CI without an intentional release.
 
 JavaScript client (browser or Node)
 -----------------------------------
@@ -214,7 +308,7 @@ You should see `sensor_msgs/PointCloud` updates rendered as readable nested obje
 Client operations
 -----------------
 
-Both the JavaScript `Client` and Python `OrchestratorClient` support the same high-level operations:
+Both the JavaScript `Client`, Python `OrchestratorClient`, and Rust `Client` support the same high-level operations:
 
 - `echo` – ask the server for a list of known topics (metadata only).
 - `subscribe` – subscribe to topic updates.
@@ -239,6 +333,7 @@ Development notes
 - The on-wire encoding/decoding for message types is implemented in:
 	- JavaScript: `clientjs/Client.js` (functions like `encodeValue`, `decodeValue`, `buildTopicData`).
 	- Python: `serialization.py` (functions `encode`, `decode`, `typeFromByte`).
+	- Rust: `clientrs/orchestrator-protocol` (functions `encode`, `decode`, frame helpers).
 - The WebSocket server entrypoint is `main.py`, which delegates to `ws.WebSocketServer`.
 
 Dynamic `.msg` type support
@@ -265,6 +360,9 @@ REST API for custom type sync
 
 Server now starts a REST API on `http://localhost:8090` for managing custom message definitions.
 
+Writes (`PUT` / `POST`) require `Authorization: Bearer <API_WRITE_TOKEN>` whenever `API_WRITE_TOKEN` is set.
+Binding the API to a non-loopback host without a token fails startup.
+
 Endpoints:
 
 - `GET /api/types`
@@ -278,6 +376,8 @@ Endpoints:
 	- JSON body: `{ "definition": "... .msg text ..." }`
 - `POST /api/types/sync`
 	- Push many definitions in one request.
+	- JSON body: `{ "types": [{"type":"pkg/Msg", "definition":"..."}] }`
+	- Invalid entries are reported in `errors` (HTTP 400) instead of being silently skipped.
 
 ROS2 bridge mode
 ----------------
@@ -304,16 +404,17 @@ Standalone container:
 
 ```bash
 docker build -t orchestrator .
-docker run --rm -p 8080:8080 -p 8090:8090 orchestrator
+docker run --rm -p 8080:8080 -p 8090:8090 -e API_WRITE_TOKEN=change-me orchestrator
 ```
 
 ROS2 bridge container:
 
 ```bash
 docker build -f Dockerfile.ros2 -t orchestrator-ros2 .
-docker run --rm -p 8080:8080 -p 8090:8090 orchestrator-ros2
+docker run --rm -p 8080:8080 -p 8090:8090 -e API_WRITE_TOKEN=change-me orchestrator-ros2
 ```
-	- JSON body: `{ "types": [{"type":"pkg/Msg", "definition":"..."}] }`
+
+Because Docker defaults bind the Types API to `0.0.0.0`, `API_WRITE_TOKEN` is required.
 
 Saved definitions are persisted under `./custom_types/<package>/msg/*.msg` and loaded into runtime parsing immediately.
 
@@ -322,17 +423,29 @@ Client sync helpers
 
 JavaScript (`clientjs/Client.js`):
 
-- `syncTypesFromServer({ apiBase, since })`
-- `syncTypesToServer(types, { apiBase })`
+- `syncTypesFromServer({ apiBase, since, token })`
+- `syncTypesToServer(types, { apiBase, token })`
 - `Client` instance methods with the same names are also available.
 
 Python (`client/client.py`):
 
-- `sync_types_from_server(api_base="http://localhost:8090", since=None)`
-- `sync_types_to_server(type_definitions, api_base="http://localhost:8090")`
-- `sync_types_folder_to_server(folder, api_base="http://localhost:8090")`
+- `sync_types_from_server(api_base="http://localhost:8090", since=None, token=None)`
+- `sync_types_to_server(type_definitions, api_base="http://localhost:8090", token=None)`
+- `sync_types_folder_to_server(folder, api_base="http://localhost:8090", token=None)`
 
 `clientjs/test.js` now pulls message definitions from the REST API before subscribing.
+
+Browser UI overrides (optional):
+
+```html
+<script>
+	window.ORCHESTRATOR_CONFIG = {
+		wsPort: 8080,
+		apiPort: 8090,
+		writeToken: null,
+	};
+</script>
+```
 
 Publish payload shape for custom messages:
 

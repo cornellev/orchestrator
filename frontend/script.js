@@ -1,11 +1,101 @@
+(function (root, factory) {
+	const api = factory();
+	if (typeof module !== "undefined" && module.exports) {
+		module.exports = api;
+	}
+	if (typeof root !== "undefined") {
+		root.OrchestratorFrontend = api;
+	}
+})(typeof globalThis !== "undefined" ? globalThis : this, function () {
+	function resolveEndpoints(locationLike = {}, overrides = {}) {
+		const protocol = (locationLike.protocol || "http:").toLowerCase();
+		const hostname = locationLike.hostname || "localhost";
+		const isSecure = protocol === "https:";
+		const wsScheme = overrides.wsScheme || (isSecure ? "wss:" : "ws:");
+		const apiScheme = overrides.apiScheme || (isSecure ? "https:" : "http:");
+		const wsPort = overrides.wsPort != null ? overrides.wsPort : 8080;
+		const apiPort = overrides.apiPort != null ? overrides.apiPort : 8090;
+		const wsHost = overrides.wsHost || hostname;
+		const apiHost = overrides.apiHost || hostname;
+		const wsPath = overrides.wsPath || "";
+		const apiBase =
+			overrides.apiBase ||
+			`${apiScheme}//${apiHost}${apiPort ? `:${apiPort}` : ""}`;
+		const wsUrl =
+			overrides.wsUrl ||
+			`${wsScheme}//${wsHost}${wsPort ? `:${wsPort}` : ""}${wsPath}`;
+		return { wsUrl, apiBase, writeToken: overrides.writeToken || null };
+	}
+
+	function parseInputValue(type, raw) {
+		const value = (raw || "").trim();
+		if (!value) return null;
+
+		if (type === "std_msgs/Int32" || type === "std_msgs/Int64" || type === "std_msgs/UInt32" || type === "std_msgs/UInt64") {
+			if (!/^-?\d+$/.test(value)) {
+				throw new Error(`Invalid integer for ${type}`);
+			}
+			const parsed = Number(value);
+			if (!Number.isFinite(parsed)) {
+				throw new Error(`Invalid integer for ${type}`);
+			}
+			return parsed;
+		}
+
+		if (type === "std_msgs/Float32" || type === "std_msgs/Float64") {
+			const parsed = Number(value);
+			if (!Number.isFinite(parsed)) {
+				throw new Error(`Invalid float for ${type}`);
+			}
+			return parsed;
+		}
+
+		if (type === "std_msgs/Bool") {
+			if (/^(true|1)$/i.test(value)) return true;
+			if (/^(false|0)$/i.test(value)) return false;
+			throw new Error("Invalid boolean (use true/false or 1/0)");
+		}
+
+		if (type === "std_msgs/Char") {
+			if (value.length !== 1) throw new Error("Char must be a single character");
+			return value;
+		}
+
+		if (type.startsWith("std_msgs/")) {
+			return value;
+		}
+
+		if (value.startsWith("{") || value.startsWith("[")) {
+			return JSON.parse(value);
+		}
+		return value;
+	}
+
+	return {
+		resolveEndpoints,
+		parseInputValue,
+	};
+});
+
+if (typeof document !== "undefined") {
 document.addEventListener("DOMContentLoaded", () => {
 	if (!window.ROSClient || !window.ROSClient.Client) {
 		console.error("ROSClient.Client is not available. Check that clientjs/Client.js is loaded.");
 		return;
 	}
 
+	const helpers = window.OrchestratorFrontend || {};
+	const resolveEndpoints = helpers.resolveEndpoints || ((loc) => ({
+		wsUrl: `ws://${loc.hostname || "localhost"}:8080`,
+		apiBase: `http://${loc.hostname || "localhost"}:8090`,
+		writeToken: null,
+	}));
+	const parseInputValue = helpers.parseInputValue;
+
 	const { Client } = window.ROSClient;
 	const topics = new Map();
+	const overrides = window.ORCHESTRATOR_CONFIG || {};
+	const endpoints = resolveEndpoints(window.location, overrides);
 
 	const container = document.createElement("div");
 	container.className = "container py-4";
@@ -81,6 +171,8 @@ document.addEventListener("DOMContentLoaded", () => {
 	const btnEcho = document.getElementById("btn-echo");
 	const btnRequestAll = document.getElementById("btn-request-all");
 
+	let connecting = false;
+
 	function escapeHtml(text) {
 		return String(text)
 			.replaceAll("&", "&amp;")
@@ -142,27 +234,23 @@ document.addEventListener("DOMContentLoaded", () => {
 		statusEl.className = `align-self-center text-${variant}`;
 	}
 
-	function parseInputValue(type, raw) {
-		const value = (raw || "").trim();
-		if (!value) return null;
-		if (type === "std_msgs/Int32") return parseInt(value, 10);
-		if (type === "std_msgs/Float32") return parseFloat(value);
-		if (type === "std_msgs/Bool") return /^true$/i.test(value) || value === "1";
-
-		if (type.startsWith("std_msgs/")) {
-			return value;
-		}
-
-		if (value.startsWith("{") || value.startsWith("[")) {
-			return JSON.parse(value);
-		}
-		return value;
-	}
-
 	const client = new Client({
-		url: `ws://${location.hostname}:8080`,
-		onOpen: () => setStatus("Connected", "success"),
-		onClose: () => setStatus("Disconnected", "muted"),
+		url: endpoints.wsUrl,
+		onOpen: () => {
+			connecting = false;
+			btnConnect.disabled = true;
+			btnConnect.textContent = "Connected";
+			setStatus("Connected", "success");
+		},
+		onClose: () => {
+			connecting = false;
+			btnConnect.disabled = false;
+			btnConnect.textContent = "Connect";
+			setStatus("Disconnected", "muted");
+		},
+		onError: (info) => {
+			setStatus(`Protocol error: ${info.message}`, "danger");
+		},
 		onEcho: async (list) => {
 			for (const info of list) {
 				const existing = topics.get(info.name) || {};
@@ -204,12 +292,30 @@ document.addEventListener("DOMContentLoaded", () => {
 		},
 	});
 
-	btnConnect.addEventListener("click", () => {
+	btnConnect.addEventListener("click", async () => {
+		if (connecting || client.isOpen()) return;
+		connecting = true;
+		btnConnect.disabled = true;
 		setStatus("Connecting...", "warning");
-		client.start().catch((err) => {
+		try {
+			try {
+				const synced = await client.syncTypesFromServer({
+					apiBase: endpoints.apiBase,
+					token: endpoints.writeToken,
+				});
+				if (synced?.count) {
+					setStatus(`Synced ${synced.count} type(s), connecting...`, "info");
+				}
+			} catch (err) {
+				console.warn("type sync skipped:", err);
+			}
+			await client.start();
+		} catch (err) {
+			connecting = false;
+			btnConnect.disabled = false;
 			console.error("Client stopped with error", err);
-			setStatus("Error - see console", "danger");
-		});
+			setStatus(`Error: ${err.message || "see console"}`, "danger");
+		}
 	});
 
 	btnEcho.addEventListener("click", async () => {
@@ -249,7 +355,7 @@ document.addEventListener("DOMContentLoaded", () => {
 		try {
 			coerced = parseInputValue(type, valueInput.value);
 		} catch (err) {
-			publishStatus.textContent = "Invalid JSON for custom message value";
+			publishStatus.textContent = err.message || "Invalid value";
 			publishStatus.className = "mt-2 small text-danger";
 			return;
 		}
@@ -268,8 +374,9 @@ document.addEventListener("DOMContentLoaded", () => {
 			renderTopics();
 		} catch (e) {
 			console.error("Publish failed", e);
-			publishStatus.textContent = "Publish failed";
+			publishStatus.textContent = e.message || "Publish failed";
 			publishStatus.className = "mt-2 small text-danger";
 		}
 	});
 });
+}
