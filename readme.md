@@ -8,24 +8,58 @@ This project provides a small WebSocket server and matching clients (JavaScript,
 - The Python client in `client/client.py`.
 - The Rust crates in `clientrs/` (`orchestrator-protocol` + `orchestrator-ws-client`).
 
+Installation
+------------
+
+One-line install (clones into `./orchestrator` and sets up the server):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cornellev/orchestrator/main/install.sh | bash
+```
+
+Install a specific target:
+
+```bash
+# Server only (default for curl install)
+curl -fsSL https://raw.githubusercontent.com/cornellev/orchestrator/main/install.sh | bash -s -- server
+
+# JavaScript client
+curl -fsSL https://raw.githubusercontent.com/cornellev/orchestrator/main/install.sh | bash -s -- client:js
+
+# Python + Node + Rust clients
+curl -fsSL https://raw.githubusercontent.com/cornellev/orchestrator/main/install.sh | bash -s -- client
+
+# Everything (server + all clients)
+curl -fsSL https://raw.githubusercontent.com/cornellev/orchestrator/main/install.sh | bash -s -- all
+```
+
+Custom install directory or branch:
+
+```bash
+ORCHESTRATOR_DIR=~/src/orchestrator \
+  curl -fsSL https://raw.githubusercontent.com/cornellev/orchestrator/main/install.sh | bash
+
+curl -fsSL https://raw.githubusercontent.com/cornellev/orchestrator/main/install.sh | bash -s -- --dir ~/src/orchestrator server
+```
+
+If you already have the repo checked out, run `./install.sh` from the project root (defaults to installing everything):
+
+```bash
+./install.sh            # server + all clients
+./install.sh server     # Python server only
+./install.sh client:js  # Node client only
+./install.sh --help
+```
+
 Running the server
 ------------------
 
 Requirements:
 
 - Python 3.9+ (asyncio-based)
-- `websockets` (installed via `requirements.txt`)
+- `websockets` (installed via `requirements.txt` or `install.sh`)
 
-Install dependencies (lowk not needed, just install websockets and ur prob good to go):
-
-```bash
-python -m venv .venv
-source .venv/bin/activate  # On Windows use: .venv\\Scripts\\activate
-pip install -r requirements.txt
-```
-
-
-and start the server:
+After installing (see above), start the server:
 ```
 python main.py
 ```
