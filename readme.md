@@ -48,6 +48,7 @@ If you already have the repo checked out, run `./install.sh` from the project ro
 ./install.sh            # server + all clients
 ./install.sh server     # Python server only
 ./install.sh client:js  # Node client only
+./install.sh command    # install the `orch` launcher only (already installed)
 ./install.sh --help
 ```
 
@@ -59,7 +60,20 @@ Requirements:
 - Python 3.9+ (asyncio-based)
 - `websockets` (installed via `requirements.txt` or `install.sh`)
 
-After installing (see above), start the server:
+After installing the server, start it from any directory:
+
+```bash
+orch
+```
+
+`install.sh` puts `orch` on your PATH (`~/.local/bin` by default). If the server is already installed and you only need the command:
+
+```bash
+./install.sh command
+```
+
+You can still start it from the repo:
+
 ```
 python main.py
 ```
