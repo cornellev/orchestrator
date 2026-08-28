@@ -88,6 +88,15 @@ function registerMessageSchema(typeName, fields) {
 	DYNAMIC_SCHEMAS.set(normalizedType, normalizedFields);
 }
 
+function listRegisteredSchemaTypes() {
+	return [...new Set([...DYNAMIC_SCHEMAS.keys(), ...Object.keys(TYPE_ENCODERS)])];
+}
+
+function hasRegisteredSchema(typeStr) {
+	const normalized = normalizeTypeName(typeStr, null);
+	return TYPE_ENCODERS[normalized] !== undefined || DYNAMIC_SCHEMAS.has(normalized);
+}
+
 async function registerMsgDefinitionFromFile(typeName, fileText) {
 	const data = await fetch(fileText);
 	if (!data.ok) throw new Error(`Failed to load message definition from ${fileText}: ${data.status} ${data.statusText}`);
@@ -189,7 +198,7 @@ async function syncTypesFromServer({ apiBase = "http://localhost:8090", since, t
 		registerMsgDefinition(item.type, item.definition);
 		loaded.push(item.type);
 	}
-	return { count: loaded.length, types: loaded };
+	return { count: loaded.length, types: loaded, catalogHash: payload.catalogHash || payload.hash || null };
 }
 
 async function syncTypesToServer(types, { apiBase = "http://localhost:8090", token } = {}) {
@@ -563,6 +572,10 @@ function encodeValue(typeStr, value) {
 	return out;
 }
 
+export function encodeTopicValue(typeStr, value) {
+	return encodeValue(typeStr, value);
+}
+
 function decodeValue(view, offset) {
 	_requireBytes(view, offset, 5, "typed envelope");
 	const typeByte = view[offset];
@@ -641,6 +654,13 @@ function buildTopicData(topicName, typeStr, value) {
 		throw new Error(`Topic name exceeds ${MAX_TOPIC_NAME_LEN} UTF-8 bytes`);
 	}
 	const payload = encodeValue(typeStr, value);
+	return buildTopicDataFromEncodedName(encodedName, payload);
+}
+
+function buildTopicDataFromEncodedName(encodedName, payload) {
+	if (encodedName.length > MAX_TOPIC_NAME_LEN) {
+		throw new Error(`Topic name exceeds ${MAX_TOPIC_NAME_LEN} UTF-8 bytes`);
+	}
 	const out = new Uint8Array(1 + encodedName.length + payload.length);
 	out[0] = encodedName.length;
 	out.set(encodedName, 1);
@@ -830,12 +850,43 @@ class Client {
 		await this._send(out);
 	}
 
+	async publishEncoded(topic, encodedValue) {
+		const encodedName = encoder.encode(topic);
+		const payload = buildTopicDataFromEncodedName(encodedName, encodedValue);
+		const out = new Uint8Array(1 + payload.length);
+		out[0] = OP_CODES.publish;
+		out.set(payload, 1);
+		await this._send(out);
+	}
+
 	async syncTypesFromServer(options = {}) {
 		return syncTypesFromServer(options);
 	}
 
 	async syncTypesToServer(types, options = {}) {
 		return syncTypesToServer(types, options);
+	}
+
+	async fetchTopicCatalog(timeoutMs = 5000) {
+		if (!this.isOpen()) throw new Error("WebSocket not open");
+		return new Promise((resolve, reject) => {
+			const previousEcho = this.onEcho;
+			const timeout = setTimeout(() => {
+				this.onEcho = previousEcho;
+				reject(new Error("Timed out waiting for orchestrator topic catalog."));
+			}, timeoutMs);
+			this.onEcho = async (topics) => {
+				clearTimeout(timeout);
+				this.onEcho = previousEcho;
+				if (previousEcho) await previousEcho(topics);
+				resolve(topics);
+			};
+			this.echo().catch((error) => {
+				clearTimeout(timeout);
+				this.onEcho = previousEcho;
+				reject(error);
+			});
+		});
 	}
 
 	_rejectReady(err) {
@@ -975,6 +1026,20 @@ function wait(ms) {
 	return new Promise((r) => setTimeout(r, ms));
 }
 
+export {
+	Client,
+	MAX_TOPIC_NAME_LEN,
+	buildTopicData,
+	decodeValue,
+	hasRegisteredSchema,
+	listRegisteredSchemaTypes,
+	registerMessageSchema,
+	registerMsgDefinition,
+	registerMsgDefinitionFromFile,
+	syncTypesFromServer,
+	syncTypesToServer,
+};
+
 // Export for Node (CommonJS) and attach to window in browsers
 if (typeof module !== "undefined" && module.exports) {
 	module.exports = {
@@ -983,6 +1048,8 @@ if (typeof module !== "undefined" && module.exports) {
 		buildTopicData,
 		encodeValue,
 		decodeValue,
+		hasRegisteredSchema,
+		listRegisteredSchemaTypes,
 		registerMessageSchema,
 		registerMsgDefinition,
 		registerMsgDefinitionFromFile,
@@ -998,6 +1065,8 @@ if (typeof window !== "undefined") {
 		buildTopicData,
 		encodeValue,
 		decodeValue,
+		hasRegisteredSchema,
+		listRegisteredSchemaTypes,
 		registerMessageSchema,
 		registerMsgDefinition,
 		registerMsgDefinitionFromFile,

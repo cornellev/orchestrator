@@ -17,12 +17,15 @@
 #   client:js           JavaScript/Node client
 #   client:rust         Rust workspace
 #   all                 Server + all clients (default when run from a local checkout)
+#   command             Install the `orch` launcher only (existing checkout)
 #
 # Options:
 #   --dir PATH          Install directory (same as ORCHESTRATOR_DIR)
 #   --branch BRANCH     Git branch (same as ORCHESTRATOR_BRANCH)
 #   --venv PATH         Python virtualenv directory (default: <install-dir>/.venv)
+#   --bin-dir PATH      Directory for the `orch` command (default: ~/.local/bin)
 #   --no-venv           Install Python packages with pip --user
+#   --no-command        Do not install the `orch` launcher
 #   --skip-rust         Skip Rust client when installing client/all
 #   --skip-node         Skip Node client when installing client/all
 #   --no-clone          Use the current directory; do not clone or update
@@ -36,10 +39,14 @@ INSTALL_DIR="${ORCHESTRATOR_DIR:-./orchestrator}"
 TARGET=""
 USE_VENV=1
 VENV_DIR=""
+BIN_DIR="${ORCHESTRATOR_BIN_DIR:-}"
 SKIP_RUST=0
 SKIP_NODE=0
 NO_CLONE=0
+NO_COMMAND=0
 LOCAL_CHECKOUT=0
+COMMAND_INSTALLED=0
+PATH_HINT=""
 
 if [[ -t 1 ]] && [[ "${NO_COLOR:-}" == "" ]] && [[ "${TERM:-}" != "dumb" ]]; then
 	BOLD=$'\033[1m'
@@ -75,13 +82,14 @@ Targets:
   client:js           JavaScript/Node client
   client:rust         Rust workspace
   all                 Server + all clients (default when run from a local checkout)
+  command             Install the orch launcher only (existing checkout)
 
 Environment:
-  ORCHESTRATOR_REPO, ORCHESTRATOR_BRANCH, ORCHESTRATOR_DIR
+  ORCHESTRATOR_REPO, ORCHESTRATOR_BRANCH, ORCHESTRATOR_DIR, ORCHESTRATOR_BIN_DIR
 
 Options:
-  --dir PATH, --branch BRANCH, --venv PATH, --no-venv
-  --skip-rust, --skip-node, --no-clone, -h, --help
+  --dir PATH, --branch BRANCH, --venv PATH, --bin-dir PATH
+  --no-venv, --no-command, --skip-rust, --skip-node, --no-clone, -h, --help
 EOF
 }
 
@@ -101,7 +109,7 @@ detect_local_checkout() {
 parse_args() {
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
-			server|client|client:python|client:js|client:rust|all)
+			server|client|client:python|client:js|client:rust|all|command)
 				TARGET="$1"
 				;;
 			--dir)
@@ -120,8 +128,16 @@ parse_args() {
 				USE_VENV=1
 				shift
 				;;
+			--bin-dir)
+				[[ $# -ge 2 ]] || die "--bin-dir requires a path"
+				BIN_DIR="$2"
+				shift
+				;;
 			--no-venv)
 				USE_VENV=0
+				;;
+			--no-command)
+				NO_COMMAND=1
 				;;
 			--skip-rust)
 				SKIP_RUST=1
@@ -155,6 +171,14 @@ parse_args() {
 	if [[ -z "$VENV_DIR" ]]; then
 		VENV_DIR="${INSTALL_DIR}/.venv"
 	fi
+
+	if [[ -z "$BIN_DIR" ]]; then
+		BIN_DIR="${HOME}/.local/bin"
+	fi
+
+	if [[ "$TARGET" == "command" ]]; then
+		NO_COMMAND=0
+	fi
 }
 
 want_server() {
@@ -186,10 +210,18 @@ want_client_rust() {
 	esac
 }
 
+want_orch_command() {
+	[[ "$NO_COMMAND" -eq 0 ]] || return 1
+	case "$TARGET" in
+		server|all|command) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
 check_prerequisites() {
 	step "Checking prerequisites"
 
-	if [[ "$LOCAL_CHECKOUT" -eq 0 && "$NO_CLONE" -eq 0 ]]; then
+	if [[ "$TARGET" != "command" && "$LOCAL_CHECKOUT" -eq 0 && "$NO_CLONE" -eq 0 ]]; then
 		have git || die "git is required. Install it, then re-run this script."
 		ok "git $(git --version | awk '{print $3}')"
 	fi

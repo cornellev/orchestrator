@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Start the Orchestrator server from any directory.
+# Install onto PATH with: ./install.sh command
+set -euo pipefail
+
+_resolve_home() {
+	if [[ -n "${ORCHESTRATOR_HOME:-}" ]]; then
+		cd "$ORCHESTRATOR_HOME" && pwd
+		return
+	fi
+
+	local source="${BASH_SOURCE[0]}"
+	while [[ -L "$source" ]]; do
+		local dir
+		dir="$(cd "$(dirname "$source")" && pwd)"
+		source="$(readlink "$source")"
+		[[ "$source" != /* ]] && source="${dir}/${source}"
+	done
+	cd "$(dirname "$source")/.." && pwd
+}
+
+ORCH_HOME="$(_resolve_home)"
+
+if [[ ! -f "${ORCH_HOME}/main.py" ]]; then
+	printf 'orch: could not find Orchestrator at %s\n' "$ORCH_HOME" >&2
+	printf 'orch: set ORCHESTRATOR_HOME or re-run ./install.sh command\n' >&2
+	exit 1
+fi
+
+PYTHON=""
+if [[ -n "${ORCHESTRATOR_VENV:-}" && -x "${ORCHESTRATOR_VENV}/bin/python" ]]; then
+	PYTHON="${ORCHESTRATOR_VENV}/bin/python"
+elif [[ -x "${ORCH_HOME}/.venv/bin/python" ]]; then
+	PYTHON="${ORCH_HOME}/.venv/bin/python"
+elif [[ -n "${VIRTUAL_ENV:-}" && -x "${VIRTUAL_ENV}/bin/python" ]]; then
+	PYTHON="${VIRTUAL_ENV}/bin/python"
+else
+	PYTHON="$(command -v python3 || true)"
+fi
+
+if [[ -z "$PYTHON" ]]; then
+	printf 'orch: python3 not found. Run ./install.sh server first.\n' >&2
+	exit 1
+fi
+
+cd "$ORCH_HOME"
+exec "$PYTHON" "${ORCH_HOME}/main.py" "$@"

@@ -1,1 +1,1 @@
-LaneBounds[] lanes
+sensor_fusion_msgs/LaneBounds[] lanes
