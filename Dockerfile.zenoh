@@ -1,0 +1,24 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+COPY requirements.txt requirements-zenoh.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-zenoh.txt
+
+COPY . .
+
+ENV WS_HOST=0.0.0.0 \
+    WS_PORT=8080 \
+    API_HOST=0.0.0.0 \
+    API_PORT=8090 \
+    ZENOH_ENABLED=true \
+    ZENOH_MODE=peer \
+    ZENOH_KEY_PREFIX=orch \
+    ZENOH_PAYLOAD=orch \
+    PYTHONUNBUFFERED=1
+# Set API_WRITE_TOKEN when exposing the Types API beyond loopback.
+# Optional: ZENOH_CONNECT, ZENOH_LISTEN, ZENOH_CONFIG_FILE, ZENOH_PAYLOAD=json
+
+EXPOSE 8080 8090
+
+CMD ["python", "-u", "main.py"]

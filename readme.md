@@ -23,6 +23,9 @@ Install a specific target:
 # Server only (default for curl install)
 curl -fsSL https://raw.githubusercontent.com/cornellev/orchestrator/main/install.sh | bash -s -- server
 
+# Server + eclipse-zenoh extra
+curl -fsSL https://raw.githubusercontent.com/cornellev/orchestrator/main/install.sh | bash -s -- server:zenoh
+
 # JavaScript client
 curl -fsSL https://raw.githubusercontent.com/cornellev/orchestrator/main/install.sh | bash -s -- client:js
 
@@ -47,6 +50,7 @@ If you already have the repo checked out, run `./install.sh` from the project ro
 ```bash
 ./install.sh            # server + all clients
 ./install.sh server     # Python server only
+./install.sh server:zenoh  # Python server + eclipse-zenoh extra
 ./install.sh client:js  # Node client only
 ./install.sh command    # install the `orch` launcher only (already installed)
 ./install.sh --help
@@ -89,10 +93,11 @@ Stop the server with Ctrl+C.
 Configuration (env vars)
 ------------------------
 
-The server supports two runtime modes:
+The server supports three runtime modes:
 
-- **Standalone (default):** WebSocket + Types API only; no ROS required.
+- **Standalone (default):** WebSocket + Types API only; no ROS or Zenoh required.
 - **ROS2 bridge (opt-in):** Enables an auto-discovery ROS 2 (rclpy) topic bridge.
+- **Zenoh bridge (opt-in):** Enables a native Eclipse Zenoh topic bridge (`eclipse-zenoh`). Independent of ROS; both bridges may run at once.
 
 Common env vars:
 
@@ -106,6 +111,16 @@ ROS2 bridge env vars (only used if `ROS_ENABLED=true`):
 - `ROS_ENABLED` (default `false`)
 - `ROS_NODE_NAME` (default `orchestrator_bridge`)
 - `ROS_DISCOVERY_PERIOD_SEC` (default `1.0`)
+
+Zenoh bridge env vars (only used if `ZENOH_ENABLED=true`):
+
+- `ZENOH_ENABLED` (default `false`)
+- `ZENOH_CONFIG_FILE` (optional JSON5 path; do not use `ZENOH_CONFIG`, which eclipse-zenoh already claims)
+- `ZENOH_MODE` (default `peer`; `client` requires a router via `ZENOH_CONNECT`)
+- `ZENOH_CONNECT` / `ZENOH_LISTEN` (comma-separated endpoints, e.g. `tcp/127.0.0.1:7447`)
+- `ZENOH_KEY_PREFIX` (default `orch`)
+- `ZENOH_PAYLOAD` (default `orch` for orchestrator binary; `json` for UTF-8 JSON)
+- `ZENOH_LOOPBACK_TTL_SEC` (default `0.35`)
 
 Binary protocol notes
 ---------------------
@@ -445,6 +460,32 @@ Notes:
 
 - On macOS, ROS 2 discovery from Docker Desktop to a host ROS graph can be unreliable (DDS/networking). For best results, run the bridge in the same ROS environment as the nodes you want to bridge.
 
+Zenoh bridge mode
+-----------------
+
+Native Eclipse Zenoh (no ROS, `rmw_zenoh`, or `zenoh-bridge-ros2dds`). Install the extra first:
+
+```bash
+pip install -r requirements-zenoh.txt
+# or: ./install.sh server:zenoh
+ZENOH_ENABLED=true python main.py
+```
+
+Behavior:
+
+- The bridge subscribes to `{ZENOH_KEY_PREFIX}/**` (default `orch/**`) and mirrors inbound puts into the WebSocket server.
+- WebSocket `publish` calls are forwarded as Zenoh puts.
+- Orchestrator topic `/foo/bar` maps to Zenoh key `orch/foo/bar`.
+- Default payload is `serialization.encode` bytes with encoding `application/octet-stream;<type>` (e.g. `application/octet-stream;std_msgs/String`). `ZENOH_PAYLOAD=json` uses `application/json;<type>` instead.
+
+This convention is **not** interoperable with ROS 2 nodes using `rmw_zenoh_cpp` or `zenoh-bridge-ros2dds`. Those use different key expressions and CDR.
+
+Demo publisher (requires `eclipse-zenoh`):
+
+```bash
+python client/demo_zenoh_pub.py
+```
+
 Docker
 ------
 
@@ -460,6 +501,13 @@ ROS2 bridge container:
 ```bash
 docker build -f Dockerfile.ros2 -t orchestrator-ros2 .
 docker run --rm -p 8080:8080 -p 8090:8090 -e API_WRITE_TOKEN=change-me orchestrator-ros2
+```
+
+Zenoh bridge container:
+
+```bash
+docker build -f Dockerfile.zenoh -t orchestrator-zenoh .
+docker run --rm -p 8080:8080 -p 8090:8090 -e API_WRITE_TOKEN=change-me orchestrator-zenoh
 ```
 
 Because Docker defaults bind the Types API to `0.0.0.0`, `API_WRITE_TOKEN` is required.
