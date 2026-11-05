@@ -181,7 +181,7 @@ class SimAdapter:
                 return
             self.command_sequence = int(h["sequence"])
             command = value["command"]
-            if self.router.run.get("completed_reason"):
+            if self.context["mode"] == "observe" or self.router.run.get("completed_reason"):
                 self.stop()
                 return
             speed, steer = command["speed_mps"], command["steering_rad"]

@@ -78,6 +78,13 @@ class RoutingTests(unittest.TestCase):
         with self.assertRaises(Exception):self.request("publish",route="absent",value={})
         self.router.deactivate("one")
         with self.assertRaises(ValueError):self.router.prepare({"profile_id":"test","run_id":"one","fingerprint":self.value["fingerprint"]})
+    def test_activation_cannot_replace_internal_run_state(self):
+        self.router.deactivate("one")
+        self.router.prepare({"profile_id":"test","run_id":"new","fingerprint":self.value["fingerprint"]})
+        with self.assertRaises(ValueError):self.router.activate("new",{"run_id":"replacement"})
+        self.assertEqual(self.router.status()["run_id"],"new")
+        self.assertFalse(self.router.status()["active"])
+
     def test_pending_samples_are_latest_only(self):
         self.request("hello");self.request("subscribe",route="note")
         for i in range(100):self.request("publish",route="note",value={"nonce":str(i)})

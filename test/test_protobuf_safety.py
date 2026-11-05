@@ -62,3 +62,8 @@ class SafetyTests(unittest.TestCase):
         self.a.incoming("path",{**self.path,"header":{**self.source,"sequence":"11"},"availability":"NO_PATH"})
         self.a.incoming("path",self.path)
         self.assertIsNone(self.a.path)
+
+    def test_observation_mode_never_applies_motion(self):
+        self.a.context["mode"]="observe"
+        self.a.incoming("command",self.command)
+        self.assertEqual(self.r.sim.values["/cmd"]["speed"],0)

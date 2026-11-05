@@ -17,6 +17,8 @@ class Profile:
     def __init__(self, value):
         if not isinstance(value, dict):
             raise ValueError("Profile must be an object")
+        if "onboarding" in value and not isinstance(value["onboarding"], bool):
+            raise ValueError("onboarding must be a boolean")
         self.value = json.loads(json.dumps(value))
         raw = base64.b64decode(value["descriptor"], validate=True)
         if not raw or len(raw) > 700_000:
@@ -155,6 +157,9 @@ class ProtobufRouter:
             run = self._run(run_id)
             if run["active"] or run["fault"]:
                 raise ValueError("Run already activated or failed")
+            allowed = {"browser_id", "sim_run_id", "resolved_hash"}
+            if not isinstance(identity, dict) or set(identity)-allowed or any(not isinstance(v,str) or not v or len(v)>256 for v in identity.values()):
+                raise ValueError("Activation accepts only browser_id, sim_run_id, and resolved_hash")
             if run["profile"].value.get("onboarding") and not all(identity.get(k) for k in ("browser_id", "sim_run_id", "resolved_hash")):
                 raise ValueError("Browser, simulation run, and resolved hash are required")
             run.update(identity)
