@@ -1,5 +1,6 @@
 import asyncio
 import os
+import argparse
 import ws
 from types_api import TypesAPIServer
 
@@ -60,6 +61,10 @@ def _env_choice(name: str, default: str, choices: set[str]) -> str:
 
 
 async def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--zenoh-profile", help="Enable descriptor-driven Protobuf routing")
+    parser.add_argument("--zenoh-connect", default="tcp/127.0.0.1:7447")
+    args = parser.parse_args()
     ws_host = os.getenv("WS_HOST", "localhost")
     ws_port = _env_int("WS_PORT", 8080, minimum=1, maximum=65535)
     api_host = os.getenv("API_HOST", "localhost")
@@ -88,7 +93,7 @@ async def main() -> None:
         store_dir=store_dir,
         write_token=api_write_token,
     )
-    types_api.start()
+    # Start HTTP after all optional routing capabilities are attached.
     print(f"Types API started on http://{api_host}:{api_port}")
     if api_write_token:
         print("Types API write protection enabled (API_WRITE_TOKEN)")
@@ -118,6 +123,16 @@ async def main() -> None:
         ros_bridge.start()
         bridges.append(ros_bridge)
         print("ROS2 bridge enabled")
+
+    if args.zenoh_profile:
+        from protobuf_routing import ProtobufRouter
+        router = ProtobufRouter(args.zenoh_connect, sim=server.sim)
+        server.protobuf_router = router
+        types_api.protobuf_router = router
+        bridges.append(router)
+        print(f"Protobuf routing enabled; register {args.zenoh_profile} with setup")
+
+    types_api.start()
 
     if zenoh_enabled:
         from zenoh_bridge import ZenohBridge, ZenohBridgeConfig
