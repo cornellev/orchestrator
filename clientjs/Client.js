@@ -1,5 +1,5 @@
 
-const WebSocketImpl = typeof WebSocket !== "undefined" ? WebSocket : require("ws");
+let WebSocketImpl = typeof WebSocket !== "undefined" ? WebSocket : undefined;
 
 const OP_CODES = {
 	echo: 0x00,
@@ -147,12 +147,7 @@ async function _requestJson(method, url, body = undefined, token = undefined) {
 		throw new Error("No fetch implementation available in browser environment");
 	}
 
-	let http;
-	if (url.startsWith("https:")) {
-		http = require("https");
-	} else {
-		http = require("http");
-	}
+	const http = await import(url.startsWith("https:") ? "node:https" : "node:http");
 	return new Promise((resolve, reject) => {
 		const req = http.request(
 			url,
@@ -898,6 +893,7 @@ class Client {
 	}
 
 	async _connect() {
+		if (!WebSocketImpl) WebSocketImpl = (await import("ws")).default;
 		await new Promise((resolve, reject) => {
 			const ws = new WebSocketImpl(this.url);
 			this.ws = ws;
@@ -1030,6 +1026,7 @@ export {
 	Client,
 	MAX_TOPIC_NAME_LEN,
 	buildTopicData,
+	encodeValue,
 	decodeValue,
 	hasRegisteredSchema,
 	listRegisteredSchemaTypes,

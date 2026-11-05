@@ -4,6 +4,9 @@ on:
   push:
     paths:
       - "clientrs/**"
+      - "clientjs/**"
+      - "frontend/**"
+      - "test/test_js*.test.js"
       - "test/protocol_vectors.json"
       - "serialization.py"
       - "ws.py"
@@ -13,6 +16,9 @@ on:
   pull_request:
     paths:
       - "clientrs/**"
+      - "clientjs/**"
+      - "frontend/**"
+      - "test/test_js*.test.js"
       - "test/protocol_vectors.json"
       - "serialization.py"
       - "ws.py"
@@ -89,7 +95,7 @@ jobs:
         run: python -m unittest test.test_protocol -v
 
       - name: JS protocol tests
-        run: node --test test/test_js_protocol.test.js
+        run: node --test test/test_js*.test.js
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
