@@ -570,3 +570,10 @@ This README is based on the behavior of `Client.js`, `client/client.py`, and the
 
 
 - TODO: Add optional JS custom-message codec generation from `.msg` files.
+## Descriptor-driven Protobuf routing
+
+`orch --zenoh-profile cev-onboarding-v1 --zenoh-connect tcp/127.0.0.1:7447`
+enables the optional generic Protobuf bridge. Register descriptors and explicit
+routes, then use ProtoJSON browser publications and binary Protobuf over Zenoh.
+Install `requirements-protobuf.txt`; the existing `orch` and `json` modes remain
+available. See [the API, safety contract, and live interoperability check](docs/protobuf.md).

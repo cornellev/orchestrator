@@ -1,4 +1,5 @@
 import asyncio
+import json
 import struct
 import threading
 from websockets.asyncio.server import serve
@@ -60,11 +61,13 @@ class WebSocketServer:
         *,
         loop: Optional[asyncio.AbstractEventLoop] = None,
         on_client_publish=None,
+        protobuf_router=None,
     ) -> None:
         self.host = host
         self.port = port
 
         self.loop: Optional[asyncio.AbstractEventLoop] = loop
+        self.protobuf_router = protobuf_router
         self._on_client_publish = on_client_publish
 
         self.clients = {}  # maps connected clients with last interaction time
@@ -97,9 +100,29 @@ class WebSocketServer:
         nickname = names.generate_name()
         self.nicknames[websocket] = nickname
         print(f"Client connected: {nickname} ({websocket.remote_address})")
+        async def pump():
+            while True:
+                if self.protobuf_router:
+                    for value in self.protobuf_router.drain(websocket):
+                        await websocket.send(json.dumps(value))
+                await asyncio.sleep(0.02)
+        pump_task = asyncio.create_task(pump())
         try:
             try:
                 async for message in websocket:
+                    if isinstance(message, str):
+                        try:
+                            if not self.protobuf_router:
+                                raise ValueError("Protobuf routing is disabled")
+                            reply = self.protobuf_router.handle_text(websocket, message)
+                        except Exception as exc:
+                            reply = {"protocol":"orch.protobuf.v1", "op":"error", "error":str(exc)}
+                            try:
+                                reply["request_id"] = json.loads(message).get("request_id")
+                            except (ValueError, AttributeError):
+                                pass
+                        await websocket.send(json.dumps(reply))
+                        continue
                     if not message:
                         await websocket.send(encode_error("Empty WebSocket frame", code=100))
                         await websocket.close(code=PROTOCOL_CLOSE_CODE, reason="empty frame")
@@ -127,6 +150,10 @@ class WebSocketServer:
                 if not isinstance(exc, (ConnectionClosedOK, ConnectionClosedError)):
                     raise
         finally:
+            pump_task.cancel()
+            await asyncio.gather(pump_task, return_exceptions=True)
+            if self.protobuf_router:
+                self.protobuf_router.disconnect(websocket)
             self.clients.pop(websocket, None)
             if self.sim is not None:
                 self.sim.unsubscribe(websocket)

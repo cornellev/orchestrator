@@ -14,6 +14,7 @@
 # Targets:
 #   server              Python server only (default for curl install)
 #   server:zenoh        Python server + eclipse-zenoh extra
+  server:protobuf     Server + pinned Zenoh/Protobuf dependencies and router
 #   client              All clients (python, js, rust)
 #   client:python       Python client
 #   client:js           JavaScript/Node client
@@ -80,6 +81,7 @@ Quick install:
 Targets:
   server              Python server only (default for curl install)
   server:zenoh        Python server + eclipse-zenoh extra
+  server:protobuf     Server + pinned Zenoh/Protobuf dependencies and router
   client              All clients (python, js, rust)
   client:python       Python client
   client:js           JavaScript/Node client
@@ -112,7 +114,7 @@ detect_local_checkout() {
 parse_args() {
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
-			server|server:zenoh|client|client:python|client:js|client:rust|all|command)
+			server|server:zenoh|server:protobuf|client|client:python|client:js|client:rust|all|command)
 				TARGET="$1"
 				;;
 			--dir)
@@ -186,7 +188,7 @@ parse_args() {
 
 want_server() {
 	case "$TARGET" in
-		server|server:zenoh|all|client:python) return 0 ;;
+		server|server:zenoh|server:protobuf|all|client:python) return 0 ;;
 		client) return 0 ;;
 		*) return 1 ;;
 	esac
@@ -220,7 +222,7 @@ want_client_rust() {
 want_orch_command() {
 	[[ "$NO_COMMAND" -eq 0 ]] || return 1
 	case "$TARGET" in
-		server|server:zenoh|all|command) return 0 ;;
+		server|server:zenoh|server:protobuf|all|command) return 0 ;;
 		*) return 1 ;;
 	esac
 }
@@ -311,6 +313,10 @@ install_python() {
 		python3 -m pip install -r requirements-zenoh.txt
 		ok "eclipse-zenoh extra installed"
 	fi
+	if [[ "$TARGET" == "server:protobuf" ]]; then
+        python3 -m pip install -r requirements-protobuf.txt
+        python3 scripts/install_zenoh.py
+    fi
 	ok "Python dependencies installed"
 }
 
@@ -509,7 +515,7 @@ print_done() {
 	printf '\n'
 
 	case "$TARGET" in
-		server|server:zenoh)
+		server|server:zenoh|server:protobuf)
 			print_orch_hint
 			if [[ "$COMMAND_INSTALLED" -eq 0 ]]; then
 				info "cd ${INSTALL_DIR}"

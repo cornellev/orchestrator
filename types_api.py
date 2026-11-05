@@ -121,6 +121,42 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
     write_token: Optional[str] = None
     max_body_bytes: int = MAX_BODY_BYTES
 
+    protobuf_router = None
+
+    def do_DELETE(self):
+        if not self._protobuf("DELETE"):
+            self._json_response(HTTPStatus.NOT_FOUND, {"error": "Not found"})
+
+    def _protobuf(self, method):
+        path = urlparse(self.path).path
+        if not path.startswith("/api/protobuf/"):
+            return False
+        if method != "GET" and not self._authorize_write():
+            return True
+        router = self.protobuf_router
+        if router is None:
+            self._json_response(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Start orch with --zenoh-profile"})
+            return True
+        try:
+            body = self._read_json_body() if method in ("PUT", "POST") else {}
+            if body is None:
+                return True
+            parts = path.strip("/").split("/")
+            if len(parts) == 4 and parts[2] == "profiles":
+                result = router.register(parts[3], body) if method == "PUT" else router.inspect(parts[3]) if method == "GET" else None
+            elif parts == ["api", "protobuf", "runs"]:
+                result = router.prepare(body) if method == "POST" else {"run": router.monitor()} if method == "GET" else None
+            elif len(parts) == 5 and parts[2] == "runs" and parts[4] == "activate" and method == "POST":
+                result = router.activate(parts[3], body)
+            elif len(parts) == 4 and parts[2] == "runs" and method == "DELETE":
+                result = router.deactivate(parts[3])
+            else:
+                result = None
+            self._json_response(HTTPStatus.OK if result is not None else HTTPStatus.NOT_FOUND, result or {"error": "Unknown Protobuf operation"})
+        except (ValueError, KeyError, TypeError) as exc:
+            self._json_response(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        return True
+
     def do_OPTIONS(self):
         self.send_response(HTTPStatus.NO_CONTENT)
         self._set_cors_headers()
@@ -128,6 +164,8 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if self._protobuf("GET"):
+            return
         parsed = urlparse(self.path)
         if parsed.path == "/api/types":
             self._handle_list_types(parsed)
@@ -155,6 +193,8 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
         self._json_response(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
     def do_PUT(self):
+        if self._protobuf("PUT"):
+            return
         if not self._authorize_write():
             return
 
@@ -193,6 +233,8 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self):
+        if self._protobuf("POST"):
+            return
         if not self._authorize_write():
             return
 
@@ -333,7 +375,7 @@ class TypesAPIHandler(BaseHTTPRequestHandler):
 
     def _set_cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
     def log_message(self, format, *args):
@@ -373,6 +415,7 @@ class TypesAPIServer:
         handler.store = self.store
         handler.write_token = self.write_token
         handler.max_body_bytes = self.max_body_bytes
+        handler.protobuf_router = getattr(self, "protobuf_router", None)
         self._httpd = ThreadingHTTPServer((self.host, self.port), handler)
 
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)

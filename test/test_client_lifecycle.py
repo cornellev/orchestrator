@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import patch
 import sys
 from pathlib import Path
 
@@ -13,9 +14,15 @@ from client.client import ClientConnectionError, ClientStoppedError, Orchestrato
 class ClientLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_start_fails_fast_when_server_unreachable(self):
         client = OrchestratorClient(uri="ws://127.0.0.1:1", reconnect=False)
-        with self.assertRaises(ClientConnectionError):
-            await asyncio.wait_for(client.start(), timeout=2.0)
-        await client.stop()
+        self.addAsyncCleanup(client.stop)
+        failure = ConnectionRefusedError("server unavailable")
+        # TCP refusal timing varies by OS; test propagation after the connector fails.
+        with patch("client.client.connect") as connect:
+            connect.return_value.__aenter__.side_effect = failure
+            with self.assertRaises(ClientConnectionError) as raised:
+                await asyncio.wait_for(client.start(), timeout=2.0)
+            connect.assert_called_once_with(client.uri)
+        self.assertIs(raised.exception.__cause__, failure)
 
     async def test_stop_unblocks_start_wait(self):
         client = OrchestratorClient(uri="ws://127.0.0.1:1", reconnect=True)

@@ -3,3 +3,5 @@ client/__pycache__
 clientrs/target/
 **/Cargo.lock
 node_modules/
+
+.venv/
