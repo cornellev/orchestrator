@@ -29,7 +29,7 @@ def verified_binary(data, checksum, executable):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--directory",type=Path,default=Path.home()/".local"/"bin")
+    parser.add_argument("--directory",type=Path,default=Path(os.environ.get("ORCHESTRATOR_BIN_DIR", Path.home()/".local"/"bin")))
     args=parser.parse_args()
     target, checksum=ASSETS[(platform.system(),platform.machine())]
     executable="zenohd.exe" if os.name=="nt" else "zenohd"
