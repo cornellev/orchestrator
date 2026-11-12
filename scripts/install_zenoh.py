@@ -21,7 +21,7 @@ def verified_binary(data, checksum, executable):
     if hashlib.sha256(data).hexdigest() != checksum:
         raise ValueError("Zenoh archive checksum mismatch")
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        matches=[n for n in archive.namelist() if Path(n).name == executable]
+        matches=[n for n in archive.namelist() if Path(n).name == executable and "/" not in n]
         if len(matches)!=1:
             raise ValueError("Expected exactly one router executable")
         return archive.read(matches[0])
